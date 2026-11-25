@@ -1,0 +1,859 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AI Demo Studio 演示契约 0.2",
+  "type": "object",
+  "properties": {
+    "schemaVersion": {
+      "const": "0.2"
+    },
+    "projectId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "rev": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/feature"
+      }
+    },
+    "elements": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/element"
+      }
+    },
+    "data": {
+      "$ref": "#/$defs/data"
+    },
+    "profile": {
+      "$ref": "#/$defs/profile"
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "narration": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/narration"
+      }
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/layer"
+      }
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "rev",
+    "source",
+    "features",
+    "elements",
+    "data",
+    "profile",
+    "steps",
+    "narration",
+    "layers"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "source": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "imported",
+            "generated"
+          ]
+        },
+        "adapterId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "entryFragment": {
+          "type": "string",
+          "pattern": "^#[A-Za-z0-9_-]+$"
+        },
+        "manifestRef": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "seedRef": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "briefRev": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "buildId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        }
+      },
+      "required": [
+        "kind",
+        "adapterId",
+        "entryFragment",
+        "manifestRef",
+        "seedRef"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "generated"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "then": {
+            "required": [
+              "briefRev",
+              "buildId"
+            ]
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "briefRev"
+                  ]
+                },
+                {
+                  "required": [
+                    "buildId"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "feature": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceRef": {
+          "type": "string",
+          "minLength": 1
+        },
+        "outcome": {
+          "type": "string",
+          "minLength": 1
+        },
+        "requirementId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "sourceRef",
+        "outcome"
+      ],
+      "additionalProperties": false
+    },
+    "element": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "by": {
+              "enum": [
+                "id",
+                "testId",
+                "label",
+                "text"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "by",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "by": {
+              "enum": [
+                "role",
+                "roleText"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1
+            },
+            "role": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id",
+            "by",
+            "value",
+            "role"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "const": "freshRunDir"
+        },
+        "runtimeFile": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9_-]+\\.json$"
+        },
+        "initial": {
+          "type": "object",
+          "properties": {
+            "allowMissing": {
+              "type": "boolean"
+            },
+            "rows": {
+              "const": 0
+            }
+          },
+          "required": [
+            "allowMissing",
+            "rows"
+          ],
+          "additionalProperties": false
+        },
+        "final": {
+          "type": "object",
+          "properties": {
+            "rows": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "match": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "number",
+                  "boolean"
+                ]
+              }
+            }
+          },
+          "required": [
+            "rows",
+            "match"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "mode",
+        "runtimeFile",
+        "initial",
+        "final"
+      ],
+      "additionalProperties": false
+    },
+    "profile": {
+      "type": "object",
+      "properties": {
+        "display": {
+          "const": "singlePrimary"
+        },
+        "devtools": {
+          "const": "networkBeforeCapture"
+        },
+        "capture": {
+          "const": "fullDesktopWithTaskbar"
+        },
+        "input": {
+          "const": "pyautogui"
+        },
+        "observe": {
+          "const": "cdpReadOnly"
+        },
+        "moveMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 10000
+        },
+        "preClickMs": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 10000
+        },
+        "tts": {
+          "type": "object",
+          "properties": {
+            "voice": {
+              "type": "string",
+              "pattern": "^zh-CN-[A-Za-z]+Neural$"
+            },
+            "rate": {
+              "type": "string",
+              "pattern": "^[+-][0-9]+%$"
+            },
+            "pitch": {
+              "type": "string",
+              "pattern": "^[+-][0-9]+Hz$"
+            },
+            "volume": {
+              "type": "string",
+              "pattern": "^[+-][0-9]+%$"
+            },
+            "lockRef": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            }
+          },
+          "required": [
+            "voice",
+            "rate",
+            "pitch",
+            "volume",
+            "lockRef"
+          ],
+          "additionalProperties": false
+        },
+        "subtitle": {
+          "type": "object",
+          "properties": {
+            "position": {
+              "enum": [
+                "upperSafe",
+                "lowerSafe"
+              ]
+            },
+            "font": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sizePx": {
+              "type": "integer",
+              "minimum": 12,
+              "maximum": 160
+            },
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}$"
+            },
+            "background": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}$"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [
+            "position",
+            "font",
+            "sizePx",
+            "color",
+            "background",
+            "opacity"
+          ],
+          "additionalProperties": false
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "fps": {
+              "enum": [
+                15,
+                24,
+                25,
+                30
+              ]
+            },
+            "scale": {
+              "const": "nativeContain"
+            },
+            "video": {
+              "const": "h264"
+            },
+            "audio": {
+              "const": "aac"
+            }
+          },
+          "required": [
+            "fps",
+            "scale",
+            "video",
+            "audio"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "display",
+        "devtools",
+        "capture",
+        "input",
+        "observe",
+        "moveMs",
+        "preClickMs",
+        "tts",
+        "subtitle",
+        "output"
+      ],
+      "additionalProperties": false
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "enum": [
+                "observe",
+                "click",
+                "refresh"
+              ]
+            },
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            }
+          },
+          "required": [
+            "op",
+            "target"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "replaceAscii"
+            },
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "text": {
+              "type": "string",
+              "pattern": "^[ -~]+$"
+            }
+          },
+          "required": [
+            "op",
+            "target",
+            "text"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "scroll"
+            },
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "notches": {
+              "type": "integer",
+              "minimum": -12,
+              "maximum": 12,
+              "not": {
+                "const": 0
+              }
+            }
+          },
+          "required": [
+            "op",
+            "target",
+            "notches"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "op": {
+              "const": "press"
+            },
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "key": {
+              "enum": [
+                "tab",
+                "enter",
+                "home",
+                "end",
+                "up",
+                "down",
+                "esc"
+              ]
+            }
+          },
+          "required": [
+            "op",
+            "target",
+            "key"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "check": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "op": {
+              "enum": [
+                "visible",
+                "checked"
+              ]
+            },
+            "expected": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "target",
+            "op",
+            "expected"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "op": {
+              "const": "count"
+            },
+            "expected": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "target",
+            "op",
+            "expected"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "op": {
+              "enum": [
+                "value",
+                "contains"
+              ]
+            },
+            "expected": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "target",
+            "op",
+            "expected"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "featureId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/check"
+          }
+        },
+        "holdMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        }
+      },
+      "required": [
+        "id",
+        "featureId",
+        "actions",
+        "checks",
+        "holdMs",
+        "timeoutMs"
+      ],
+      "additionalProperties": false
+    },
+    "narration": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "stepId": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        },
+        "anchor": {
+          "enum": [
+            "start",
+            "verified"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "id",
+        "stepId",
+        "anchor",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "layer": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "type": {
+              "enum": [
+                "desktop",
+                "voice",
+                "captions"
+              ]
+            },
+            "z": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 99
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "z"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "type": {
+              "const": "box"
+            },
+            "z": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 99
+            },
+            "stepId": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "anchor": {
+              "enum": [
+                "start",
+                "verified"
+              ]
+            },
+            "target": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}$"
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "z",
+            "stepId",
+            "anchor",
+            "target",
+            "color"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "type": {
+              "const": "card"
+            },
+            "z": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 99
+            },
+            "stepId": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9-]*$"
+            },
+            "anchor": {
+              "enum": [
+                "start",
+                "verified"
+              ]
+            },
+            "text": {
+              "type": "string",
+              "minLength": 1
+            },
+            "position": {
+              "enum": [
+                "upperSafe",
+                "lowerSafe"
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "type",
+            "z",
+            "stepId",
+            "anchor",
+            "text",
+            "position"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "source": {
+            "properties": {
+              "kind": {
+                "const": "generated"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "features": {
+            "items": {
+              "required": [
+                "requirementId"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

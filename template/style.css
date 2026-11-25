@@ -1,0 +1,24 @@
+:root { font: 15px/1.5 "Microsoft YaHei UI", "PingFang SC", sans-serif; background: #f3f5fb; color: #17223c; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { padding: 24px max(24px, calc((100vw - 900px)/2)); color: #fff; background: linear-gradient(122deg, #17266b 30%, #272e8d 80%); position: relative; overflow: hidden; }
+header::after { content: ""; position: absolute; pointer-events: none; top: -30px; right: -20px; width: 250px; height: 170px; transform: skewY(-24deg); background: repeating-linear-gradient(0deg, transparent 0 13px, #b2c5ff30 14px 15px); }
+header div { position: relative; z-index: 1; }
+h1 { margin: 0 0 4px; font-size: 29px; letter-spacing: .04em; }
+header p { margin: 0; color: #dee5ff; }
+main { max-width: 948px; margin: auto; padding: 20px 24px; display: grid; gap: 16px; }
+.card { border: 1px solid #dce2f1; border-radius: 12px; padding: 16px; background: #fff; }
+label { display: grid; grid-template-columns: minmax(100px, .22fr) 1fr; align-items: center; gap: 12px; margin: 0 0 10px; font-weight: 650; }
+input, select, textarea { min-width: 0; width: 100%; padding: 7px 10px; font: inherit; font-weight: 400; color: #17223c; border: 1px solid #c4cee6; border-radius: 6px; background: #f9faff; }
+textarea { resize: vertical; min-height: 54px; }
+button { width: 100%; padding: 8px 12px; border: 0; border-radius: 7px; color: white; background: #22348e; font: inherit; font-weight: 700; cursor: pointer; }
+button:disabled { opacity: .55; }
+h2 { margin: 0 0 8px; font-size: 17px; }
+#status { margin: 6px 0 0; color: #24478b; }
+#status:empty { display: none; }
+.empty { margin: 0; padding: 12px; text-align: center; color: #596585; background: #f5f7fc; border: 1px solid #e3e8f4; border-radius: 6px; }
+#records { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; text-align: left; }
+th, td { padding: 8px 10px; border-bottom: 1px solid #e3e8f4; overflow-wrap: anywhere; }
+th { background: #f0f3fb; }
+@media(max-width: 490px) { label { grid-template-columns: 1fr; gap: 4px; } main { padding-inline: 12px; } }

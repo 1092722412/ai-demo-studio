@@ -1,0 +1,283 @@
+{
+  "schemaVersion": "0.2",
+  "projectId": "visitor-booking",
+  "rev": 1,
+  "source": {
+    "kind": "generated",
+    "briefRev": 1,
+    "buildId": "visitor-build-001",
+    "adapterId": "generated-local-node",
+    "entryFragment": "#bookings",
+    "manifestRef": "visitor-source-manifest",
+    "seedRef": "empty-bookings"
+  },
+  "features": [
+    {
+      "id": "create-booking",
+      "requirementId": "save-and-reopen-booking",
+      "title": "新建访客预约并验证刷新后仍保留",
+      "sourceRef": "public/bookings.mjs#renderBookings",
+      "outcome": "刷新后保留一条与输入一致的预约"
+    }
+  ],
+  "elements": [
+    {
+      "id": "empty",
+      "by": "testId",
+      "value": "bookings-empty"
+    },
+    {
+      "id": "name",
+      "by": "testId",
+      "value": "visitor-name"
+    },
+    {
+      "id": "reason",
+      "by": "testId",
+      "value": "visit-reason"
+    },
+    {
+      "id": "save",
+      "by": "testId",
+      "value": "booking-save"
+    },
+    {
+      "id": "row",
+      "by": "testId",
+      "value": "booking-row"
+    },
+    {
+      "id": "readback",
+      "by": "testId",
+      "value": "booking-result"
+    },
+    {
+      "id": "workspace",
+      "by": "testId",
+      "value": "bookings-workspace"
+    }
+  ],
+  "data": {
+    "mode": "freshRunDir",
+    "runtimeFile": "bookings.json",
+    "initial": {
+      "allowMissing": true,
+      "rows": 0
+    },
+    "final": {
+      "rows": 1,
+      "match": {
+        "name": "Alex Chen",
+        "reason": "Product demo"
+      }
+    }
+  },
+  "profile": {
+    "display": "singlePrimary",
+    "devtools": "networkBeforeCapture",
+    "capture": "fullDesktopWithTaskbar",
+    "input": "pyautogui",
+    "observe": "cdpReadOnly",
+    "moveMs": 650,
+    "preClickMs": 300,
+    "tts": {
+      "voice": "zh-CN-YunxiNeural",
+      "rate": "+0%",
+      "pitch": "+0Hz",
+      "volume": "+0%",
+      "lockRef": "tts-win-x64"
+    },
+    "subtitle": {
+      "position": "lowerSafe",
+      "font": "Microsoft YaHei",
+      "sizePx": 42,
+      "color": "#FFFFFF",
+      "background": "#111111",
+      "opacity": 0.82
+    },
+    "output": {
+      "fps": 15,
+      "scale": "nativeContain",
+      "video": "h264",
+      "audio": "aac"
+    }
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "featureId": "create-booking",
+      "actions": [
+        {
+          "op": "observe",
+          "target": "empty"
+        }
+      ],
+      "checks": [
+        {
+          "target": "empty",
+          "op": "visible",
+          "expected": true
+        },
+        {
+          "target": "row",
+          "op": "count",
+          "expected": 0
+        }
+      ],
+      "holdMs": 1500,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "s2",
+      "featureId": "create-booking",
+      "actions": [
+        {
+          "op": "click",
+          "target": "name"
+        },
+        {
+          "op": "replaceAscii",
+          "target": "name",
+          "text": "Alex Chen"
+        },
+        {
+          "op": "click",
+          "target": "reason"
+        },
+        {
+          "op": "replaceAscii",
+          "target": "reason",
+          "text": "Product demo"
+        }
+      ],
+      "checks": [
+        {
+          "target": "name",
+          "op": "value",
+          "expected": "Alex Chen"
+        },
+        {
+          "target": "reason",
+          "op": "value",
+          "expected": "Product demo"
+        }
+      ],
+      "holdMs": 1800,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "s3",
+      "featureId": "create-booking",
+      "actions": [
+        {
+          "op": "click",
+          "target": "save"
+        }
+      ],
+      "checks": [
+        {
+          "target": "readback",
+          "op": "contains",
+          "expected": "已保存预约"
+        },
+        {
+          "target": "row",
+          "op": "count",
+          "expected": 1
+        }
+      ],
+      "holdMs": 1600,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "s4",
+      "featureId": "create-booking",
+      "actions": [
+        {
+          "op": "refresh",
+          "target": "workspace"
+        }
+      ],
+      "checks": [
+        {
+          "target": "row",
+          "op": "count",
+          "expected": 1
+        },
+        {
+          "target": "row",
+          "op": "contains",
+          "expected": "Alex Chen"
+        },
+        {
+          "target": "row",
+          "op": "contains",
+          "expected": "Product demo"
+        }
+      ],
+      "holdMs": 2200,
+      "timeoutMs": 10000
+    }
+  ],
+  "narration": [
+    {
+      "id": "n1",
+      "stepId": "s1",
+      "anchor": "start",
+      "text": "先看预约列表，目前没有已保存的预约。"
+    },
+    {
+      "id": "n2",
+      "stepId": "s2",
+      "anchor": "start",
+      "text": "输入访客姓名和来访事由。"
+    },
+    {
+      "id": "n3",
+      "stepId": "s3",
+      "anchor": "verified",
+      "text": "保存后，列表显示刚刚创建的预约。"
+    },
+    {
+      "id": "n4",
+      "stepId": "s4",
+      "anchor": "verified",
+      "text": "刷新页面，确认姓名和来访事由仍然可查。"
+    }
+  ],
+  "layers": [
+    {
+      "id": "desk",
+      "type": "desktop",
+      "z": 0
+    },
+    {
+      "id": "voice",
+      "type": "voice",
+      "z": 1
+    },
+    {
+      "id": "box-reason",
+      "type": "box",
+      "z": 10,
+      "stepId": "s2",
+      "target": "reason",
+      "anchor": "verified",
+      "color": "#D92727"
+    },
+    {
+      "id": "note-save",
+      "type": "card",
+      "z": 20,
+      "stepId": "s3",
+      "anchor": "verified",
+      "text": "保存成功，预约已写入本地数据。",
+      "position": "upperSafe"
+    },
+    {
+      "id": "captions",
+      "type": "captions",
+      "z": 30
+    }
+  ]
+}

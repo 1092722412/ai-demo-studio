@@ -1,0 +1,310 @@
+{
+  "schemaVersion": "0.2",
+  "projectId": "ip-stability",
+  "rev": 1,
+  "source": {
+    "kind": "imported",
+    "adapterId": "ip-stability-local",
+    "entryFragment": "#alert-rules",
+    "manifestRef": "source-manifest",
+    "seedRef": "empty-rules"
+  },
+  "features": [
+    {
+      "id": "create-alert",
+      "title": "新建端口告警规则并验证持久化",
+      "sourceRef": "public/monitor-pages.mjs#rulesPage",
+      "outcome": "刷新后保留一条启用的阈值 80 规则"
+    }
+  ],
+  "elements": [
+    {
+      "id": "empty",
+      "by": "text",
+      "value": "暂无已保存规则。填写上方条件后保存。"
+    },
+    {
+      "id": "name",
+      "by": "label",
+      "value": "策略名称"
+    },
+    {
+      "id": "threshold",
+      "by": "label",
+      "value": "告警阈值"
+    },
+    {
+      "id": "port",
+      "by": "label",
+      "value": "端口"
+    },
+    {
+      "id": "metric",
+      "by": "label",
+      "value": "指标名称"
+    },
+    {
+      "id": "enabled",
+      "by": "label",
+      "value": "立即启用"
+    },
+    {
+      "id": "save",
+      "by": "role",
+      "value": "保存规则",
+      "role": "button"
+    },
+    {
+      "id": "row",
+      "by": "roleText",
+      "value": "DEMO-RULE-80",
+      "role": "row"
+    },
+    {
+      "id": "readback",
+      "by": "text",
+      "value": "已保存并回读规则「DEMO-RULE-80」。"
+    },
+    {
+      "id": "workspace",
+      "by": "id",
+      "value": "workspace"
+    }
+  ],
+  "data": {
+    "mode": "freshRunDir",
+    "runtimeFile": "rules.json",
+    "initial": {
+      "allowMissing": true,
+      "rows": 0
+    },
+    "final": {
+      "rows": 1,
+      "match": {
+        "name": "DEMO-RULE-80",
+        "threshold": 80,
+        "portId": "pe01-ge01",
+        "metric": "inputUtilization",
+        "enabled": true
+      }
+    }
+  },
+  "profile": {
+    "display": "singlePrimary",
+    "devtools": "networkBeforeCapture",
+    "capture": "fullDesktopWithTaskbar",
+    "input": "pyautogui",
+    "observe": "cdpReadOnly",
+    "moveMs": 650,
+    "preClickMs": 300,
+    "tts": {
+      "voice": "zh-CN-YunxiNeural",
+      "rate": "+0%",
+      "pitch": "+0Hz",
+      "volume": "+0%",
+      "lockRef": "tts-win-x64"
+    },
+    "subtitle": {
+      "position": "lowerSafe",
+      "font": "Microsoft YaHei",
+      "sizePx": 42,
+      "color": "#FFFFFF",
+      "background": "#111111",
+      "opacity": 0.82
+    },
+    "output": {
+      "fps": 15,
+      "scale": "nativeContain",
+      "video": "h264",
+      "audio": "aac"
+    }
+  },
+  "steps": [
+    {
+      "id": "s1",
+      "featureId": "create-alert",
+      "actions": [
+        {
+          "op": "observe",
+          "target": "empty"
+        }
+      ],
+      "checks": [
+        {
+          "target": "empty",
+          "op": "visible",
+          "expected": true
+        },
+        {
+          "target": "port",
+          "op": "value",
+          "expected": "pe01-ge01"
+        },
+        {
+          "target": "metric",
+          "op": "value",
+          "expected": "inputUtilization"
+        },
+        {
+          "target": "enabled",
+          "op": "checked",
+          "expected": true
+        }
+      ],
+      "holdMs": 1500,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "s2",
+      "featureId": "create-alert",
+      "actions": [
+        {
+          "op": "click",
+          "target": "name"
+        },
+        {
+          "op": "replaceAscii",
+          "target": "name",
+          "text": "DEMO-RULE-80"
+        },
+        {
+          "op": "click",
+          "target": "threshold"
+        },
+        {
+          "op": "replaceAscii",
+          "target": "threshold",
+          "text": "80"
+        }
+      ],
+      "checks": [
+        {
+          "target": "name",
+          "op": "value",
+          "expected": "DEMO-RULE-80"
+        },
+        {
+          "target": "threshold",
+          "op": "value",
+          "expected": "80"
+        }
+      ],
+      "holdMs": 1800,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "s3",
+      "featureId": "create-alert",
+      "actions": [
+        {
+          "op": "click",
+          "target": "save"
+        }
+      ],
+      "checks": [
+        {
+          "target": "readback",
+          "op": "visible",
+          "expected": true
+        },
+        {
+          "target": "row",
+          "op": "count",
+          "expected": 1
+        }
+      ],
+      "holdMs": 1600,
+      "timeoutMs": 10000
+    },
+    {
+      "id": "s4",
+      "featureId": "create-alert",
+      "actions": [
+        {
+          "op": "refresh",
+          "target": "workspace"
+        }
+      ],
+      "checks": [
+        {
+          "target": "row",
+          "op": "count",
+          "expected": 1
+        },
+        {
+          "target": "row",
+          "op": "contains",
+          "expected": "80 %"
+        },
+        {
+          "target": "row",
+          "op": "contains",
+          "expected": "已启用"
+        }
+      ],
+      "holdMs": 2200,
+      "timeoutMs": 10000
+    }
+  ],
+  "narration": [
+    {
+      "id": "n1",
+      "stepId": "s1",
+      "anchor": "start",
+      "text": "先确认当前没有已保存的告警规则。"
+    },
+    {
+      "id": "n2",
+      "stepId": "s2",
+      "anchor": "start",
+      "text": "为端口输入利用率设置告警，阈值为百分之八十。"
+    },
+    {
+      "id": "n3",
+      "stepId": "s3",
+      "anchor": "verified",
+      "text": "保存规则，页面显示保存和回读结果。"
+    },
+    {
+      "id": "n4",
+      "stepId": "s4",
+      "anchor": "verified",
+      "text": "刷新页面后，这条规则仍然存在，而且处于启用状态。"
+    }
+  ],
+  "layers": [
+    {
+      "id": "desk",
+      "type": "desktop",
+      "z": 0
+    },
+    {
+      "id": "voice",
+      "type": "voice",
+      "z": 1
+    },
+    {
+      "id": "box-threshold",
+      "type": "box",
+      "z": 10,
+      "stepId": "s2",
+      "target": "threshold",
+      "anchor": "verified",
+      "color": "#D92727"
+    },
+    {
+      "id": "note-save",
+      "type": "card",
+      "z": 20,
+      "stepId": "s3",
+      "anchor": "verified",
+      "text": "保存成功后，系统回读刚创建的规则。",
+      "position": "upperSafe"
+    },
+    {
+      "id": "captions",
+      "type": "captions",
+      "z": 30
+    }
+  ]
+}
