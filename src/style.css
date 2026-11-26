@@ -98,6 +98,12 @@ h2 { margin: 0; font-size: 18px; }
 .handoff-body dl div { display: flex; gap: 12px; padding: 5px 0; }
 .handoff-body dd { margin: 0; color: var(--muted); }
 .handoff-body > .text-button { margin-left: 15px; }
+.settings-body { display: grid; gap: 12px; }
+.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 12px 18px; }
+.settings-body label { display: grid; gap: 6px; }
+.settings-body small, .settings-connection p { color: var(--muted); }
+.settings-connection > button { margin-left: 12px; }
+.settings-body a { color: inherit; }
 .conversation .panel-head h2 { display: flex; align-items: center; gap: 8px; }
 .conversation .panel-head h2 svg { color: var(--accent); }
 .chat-log { display: grid; gap: 10px; padding: 14px 16px; max-height: clamp(180px, 36vh, 405px); overflow: auto; overscroll-behavior: contain; }

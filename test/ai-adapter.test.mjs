@@ -55,7 +55,7 @@ async function createAdapter(mode, input = makeInput(), extraEnv = {}) {
   await writeFile(traceFile, '', 'utf8');
   const adapter = createCodexAppServerAdapter({
     projectRoot: root,
-    startupTimeoutMs: 1_000,
+    startupTimeoutMs: 3_000,
     interruptTimeoutMs: 800,
     terminateTimeoutMs: 800,
     buildLaunch: () => ({ command: process.execPath, args: [fixture] }),
@@ -132,6 +132,22 @@ test('初始化 app-server，会话事件、消息增量、工具事件和系统
   assert.equal(events.filter((event) => event.type === 'message.delta').map((event) => event.text).join(''), '已根据当前需求完成。');
   const started = (await trace(traceFile)).find((entry) => entry.event === 'turn-start-request');
   assert.ok(started.outputSchema);
+});
+
+test('requirements 使用独立原生输出 Schema，保留已读取的原文引用', async (t) => {
+  const sourceRef = { artifactId: 'a-quote', locator: 'page:2', quote: '应提供审批流程' };
+  const input = makeInput({ purpose: 'requirements', context: {
+    attachmentIndex: [{ artifactId: 'a-quote', path: 'attachments/sample.pdf', mime: 'application/pdf', bytes: 20, name: '合成材料' }],
+  } });
+  const { adapter, dataRoot, traceFile } = await createAdapter('success', input, {
+    FAKE_CODEX_ATTACHMENT: JSON.stringify(sourceRef),
+    FAKE_CODEX_OUTPUT: JSON.stringify({ reply: '需求整理完成。', items: [{ text: '审批流程', outcome: '显示审批结果', sourceRef }] }),
+  });
+  t.after(async () => { await adapter.close(); await rm(dataRoot, { recursive: true, force: true }); });
+  const result = await adapter.execute(input, makeRuntime(input, []));
+  assert.deepEqual(result.delivery.items, [{ text: '审批流程', outcome: '显示审批结果', sourceRef, confirmed: false }]);
+  const started = (await trace(traceFile)).find((entry) => entry.event === 'turn-start-request');
+  assert.deepEqual(started.outputSchema.required, ['reply', 'items']);
 });
 
 test('恢复原生线程并忽略其他 turn 与未知通知', async (t) => {
@@ -293,7 +309,7 @@ test('上下文 MCP 工具只读本轮上下文与索引内源码，并拒绝项
   child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
   const tools = await request(2, 'tools/list', {});
   assert.deepEqual(tools.result.tools.map(({ name }) => name), [
-    'get_demo_brief', 'load_bid_demo_system_skill', 'get_current_source',
+    'get_demo_brief', 'read_attachment', 'load_bid_demo_system_skill', 'get_current_source',
   ]);
   const brief = await request(3, 'tools/call', { name: 'get_demo_brief', arguments: {} });
   assert.match(brief.result.content[0].text, /task-mcp/);

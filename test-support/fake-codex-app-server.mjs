@@ -54,6 +54,11 @@ async function sendReceipts() {
   }
   const sourceArtifactId = process.env.FAKE_CODEX_SOURCE_ARTIFACT_ID;
   if (sourceArtifactId) await sendTool('get_current_source', { artifactId: sourceArtifactId }, '<h1>已有源码</h1>', 'tool-source');
+  const attachment = process.env.FAKE_CODEX_ATTACHMENT;
+  if (attachment) {
+    const ref = JSON.parse(attachment);
+    await sendTool('read_attachment', { artifactId: ref.artifactId, offset: 0, limit: 1 }, JSON.stringify({ sourceRefs: [ref] }), 'tool-attachment');
+  }
 }
 
 const lines = createInterface({ input: process.stdin });

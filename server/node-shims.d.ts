@@ -2,6 +2,7 @@
 declare module 'node:child_process' {
   export type ChildProcessWithoutNullStreams = any;
   export function spawn(command: string, args?: string[], options?: any): ChildProcessWithoutNullStreams;
+  export function execFile(command: string, args: string[], options: any, callback: (error: Error | null, stdout: string, stderr: string) => void): ChildProcessWithoutNullStreams;
 }
 
 declare module 'node:crypto' {
@@ -44,13 +45,19 @@ declare module 'node:sqlite' {
 }
 
 declare module 'node:fs/promises' {
+  export function open(path: string, flags: string): Promise<{
+    stat(): Promise<{ size: number }>;
+    read(buffer: Uint8Array, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
+    close(): Promise<void>;
+  }>;
   export function mkdtemp(prefix: string): Promise<string>;
   export function readFile(path: string, encoding: 'utf8'): Promise<string>;
   export function readFile(path: string): Promise<Uint8Array>;
+  export function rename(from: string, to: string): Promise<void>;
   export function realpath(path: string): Promise<string>;
   export function rm(path: string, options?: any): Promise<void>;
   export function stat(path: string): Promise<{ size: number; isFile(): boolean }>;
-  export function writeFile(path: string, data: string, encoding?: 'utf8'): Promise<void>;
+  export function writeFile(path: string, data: string | Uint8Array, options?: 'utf8' | { flag: string }): Promise<void>;
 }
 
 declare module 'node:os' {

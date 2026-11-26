@@ -139,6 +139,8 @@ export type StudioRepository = {
   updateProject(project: ProjectRecord): ProjectRecord;
   getConnection(connectionId: string): ConnectionRecord | null;
   saveConnection(connection: ConnectionRecord): ConnectionRecord;
+  listConnections(): ConnectionRecord[];
+  hasActiveConnectionTask(connectionId: string): boolean;
   getConversation(conversationId: string, projectId?: string): ConversationRecord | null;
   listConversations(projectId: string): ConversationRecord[];
   saveConversation(conversation: ConversationRecord): ConversationRecord;
@@ -152,8 +154,10 @@ export type StudioRepository = {
   getArtifact(artifactId: string, projectId?: string): ArtifactRecord | null;
   listArtifacts(projectId: string, kind?: ArtifactRecord['kind']): ArtifactRecord[];
   getArtifactPath(projectId: string, artifactId: string): { artifact: ArtifactRecord; path: string } | null;
+  getNewArtifactPath(projectId: string, relativePath: string): string;
   getPlan(projectId: string): PlanRecord | null;
   getSettings(scope: string): SettingsRecord | null;
+  ensureSettings(scope: string): SettingsRecord;
   saveProject(project: ProjectRecord): ProjectRecord;
   saveTask(task: TaskRecord): TaskRecord;
   appendEvent(event: Omit<EventRecord, 'seq'>): EventRecord;
@@ -254,6 +258,18 @@ class SqliteStudioRepository implements StudioRepository {
       connection.createdAt, connection.updatedAt,
     );
     return connection;
+  }
+
+  listConnections(): ConnectionRecord[] {
+    this.assertOpen();
+    return (this.database.prepare('SELECT * FROM connection ORDER BY created_at, id').all() as DbRow[]).map(connectionFromRow);
+  }
+
+  hasActiveConnectionTask(connectionId: string): boolean {
+    this.assertOpen();
+    return Boolean(this.database.prepare(`
+      SELECT 1 FROM task WHERE connection_id = ? AND state IN ('queued','running','waiting_input','cancelling') LIMIT 1
+    `).get(connectionId));
   }
 
   getConversation(conversationId: string, projectId?: string): ConversationRecord | null {
@@ -374,10 +390,26 @@ class SqliteStudioRepository implements StudioRepository {
     const path = resolveProjectPath(projectRoot, artifact.relativePath);
     if (!existsSync(path)) return null;
     const rootReal = realpathSync(projectRoot);
+    const expectedRoot = join(realpathSync(join(this.dataRoot, 'projects')), projectId);
+    if (relative(expectedRoot, rootReal)) throw new StoreError('VALIDATION_FAILED', '项目文件目录无效。');
     const fileReal = realpathSync(path);
     assertContained(rootReal, fileReal);
     if (!statSync(fileReal).isFile()) return null;
     return { artifact, path: fileReal };
+  }
+
+  getNewArtifactPath(projectId: string, relativePath: string): string {
+    validateId(projectId, '项目');
+    const projectsRoot = realpathSync(join(this.dataRoot, 'projects'));
+    const projectRoot = join(projectsRoot, projectId);
+    const rootReal = realpathSync(projectRoot);
+    if (relative(projectRoot, rootReal)) throw new StoreError('VALIDATION_FAILED', '项目目录不可写入。');
+    const parts = normalizeRelativePath(relativePath).split('/');
+    if (parts.length !== 2) throw new StoreError('VALIDATION_FAILED', '成果目录格式无效。');
+    const directory = join(rootReal, parts[0]!);
+    mkdirSync(directory, { recursive: true });
+    if (relative(directory, realpathSync(directory))) throw new StoreError('VALIDATION_FAILED', '成果目录不可写入。');
+    return join(directory, parts[1]!);
   }
 
   getPlan(projectId: string): PlanRecord | null {
@@ -404,6 +436,15 @@ class SqliteStudioRepository implements StudioRepository {
       editToken: String(row.edit_token),
       updatedAt: String(row.updated_at),
     };
+  }
+
+  ensureSettings(scope: string): SettingsRecord {
+    this.assertOpen();
+    this.database.prepare(`
+      INSERT OR IGNORE INTO settings (scope, values_json, edit_token, updated_at)
+      VALUES (?, '{}', ?, ?)
+    `).run(scope, randomUUID(), new Date().toISOString());
+    return this.getSettings(scope)!;
   }
 
   saveProject(project: ProjectRecord): ProjectRecord {

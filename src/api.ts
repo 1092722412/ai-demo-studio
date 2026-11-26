@@ -46,6 +46,13 @@ export type TaskEvent = {
   payload: Record<string, unknown>;
 };
 
+export type SettingsValue = string | number | null;
+export type SettingsValues = Record<string, SettingsValue | Record<string, SettingsValue>>;
+export type Settings = { values: SettingsValues; effective: SettingsValues; sources: Record<string, string>; editToken: string };
+export type ConnectionProbe = { available: boolean; capabilities: { purposes: string[] }; detail: string };
+export type Connection = { id: string; name: string; kind: string; model: string | null; enabled: boolean; lastProbe: (ConnectionProbe & { at: string }) | null };
+export type Attachment = { id: string; taskId: string | null; metadata?: { name?: string }; extractionState?: Task['state']; extractionError?: { message: string } };
+
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code: string, readonly field?: string, readonly taskId?: string) {
     super(message);
@@ -74,16 +81,35 @@ function json(body: unknown, method = 'POST'): RequestInit {
 }
 
 export const api = {
+  listConnections: () => request<Connection[]>('/api/v1/connections'),
+  probeConnection: (id: string) => request<ConnectionProbe>(`/api/v1/connections/${encodeURIComponent(id)}/probe`, json({})),
+  readSettings: (id?: string) => request<Settings>(settingsPath(id)),
+  saveSettings: (id: string | undefined, values: SettingsValues, token: string) => request<Settings>(settingsPath(id), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': `"${token}"` }, body: JSON.stringify({ values }),
+  }),
+  listAttachments: (id: string) => request<Attachment[]>(`/api/v1/projects/${encodeURIComponent(id)}/artifacts?kind=attachment`),
+  uploadAttachment: (id: string, file: File) => {
+    const body = new FormData();
+    const extension = file.name.split('.').at(-1)?.toLowerCase() ?? '';
+    const types: Record<string, string> = {
+      txt: 'text/plain', md: 'text/markdown', markdown: 'text/markdown', json: 'application/json', csv: 'text/csv',
+      pdf: 'application/pdf', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    };
+    const type = !file.type || file.type === 'application/octet-stream' || (extension === 'csv' && file.type === 'application/vnd.ms-excel')
+      ? types[extension] : file.type;
+    body.append('file', type ? file.slice(0, file.size, type) : file, file.name);
+    return request<{ artifactId: string; taskId: string }>(`/api/v1/projects/${encodeURIComponent(id)}/attachments`, { method: 'POST', body });
+  },
   listProjects: () => request<Project[]>('/api/v1/projects'),
   getProject: (id: string) => request<Project>(`/api/v1/projects/${encodeURIComponent(id)}`),
   createProject: (body: { title: string; brief: string }) => request<Project>('/api/v1/projects', json(body)),
-  patchProject: (id: string, body: { title?: string; brief?: string }) =>
+  patchProject: (id: string, body: { title?: string; brief?: string; connectionId?: string | null }) =>
     request<Project>(`/api/v1/projects/${encodeURIComponent(id)}`, json(body, 'PATCH')),
   listMessages: (projectId: string, conversationId?: string | null) => {
     const query = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : '';
     return request<{ conversationId?: string; items: Message[]; nextAfterId: string | null }>(`/api/v1/projects/${encodeURIComponent(projectId)}/messages${query}`);
   },
-  postMessage: (projectId: string, body: { requestId: string; conversationId?: string; purpose: 'discuss'; text: string }) =>
+  postMessage: (projectId: string, body: { requestId: string; conversationId?: string; purpose: 'discuss' | 'requirements'; text: string }) =>
     request<{ taskId: string; projectId: string; conversationId: string; state: Task['state']; requestId: string }>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/messages`, json(body),
     ),
@@ -92,6 +118,10 @@ export const api = {
     request<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}/input`, json(body)),
   cancelTask: (taskId: string) => request<Task>(`/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`, json({ reason: 'user-requested' })),
 };
+
+function settingsPath(id?: string) {
+  return id ? `/api/v1/projects/${encodeURIComponent(id)}/settings` : '/api/v1/settings';
+}
 
 export function isTaskActive(state: Task['state'] | undefined): boolean {
   return state === 'queued' || state === 'running' || state === 'waiting_input' || state === 'cancelling';

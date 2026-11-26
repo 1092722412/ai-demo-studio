@@ -1,9 +1,14 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
+import multipart from '@fastify/multipart';
 import { readFile } from 'node:fs/promises';
 import { createProjectsService, type HttpServiceError, type ProjectAdapterContext } from './services/projects.js';
 import { readTaskEvents } from './events.js';
 import type { StudioRepository } from './store/repository.js';
 import type { TaskService } from './tasks.js';
+import { createSettingsService } from './settings.js';
+import { createConnectionsService } from './connections.js';
+import { createArtifactJobs } from './services/artifact-jobs.js';
+import { maxAttachmentBytes } from './attachments.js';
 
 const jsonLimit = 1_048_576;
 const localHostPattern = /^127\.0\.0\.1:\d{1,5}$/;
@@ -17,17 +22,28 @@ export function createHttpApp({
   repository,
   tasks,
   adapters,
+  connectionProbes,
+  credentialStorage,
+  speechRenderer,
 }: {
   repository: StudioRepository;
   tasks: TaskService;
   adapters?: ProjectAdapterContext;
+  connectionProbes?: Parameters<typeof createConnectionsService>[1];
+  credentialStorage?: Parameters<typeof createConnectionsService>[2];
+  speechRenderer?: Parameters<typeof createArtifactJobs>[1];
 }): StudioHttpApp {
   const projects = createProjectsService(repository, tasks, adapters);
+  const settings = createSettingsService(repository);
+  const connections = createConnectionsService(repository, connectionProbes, credentialStorage);
+  const artifactJobs = createArtifactJobs(repository, speechRenderer);
   const app = Fastify({
     bodyLimit: jsonLimit,
     exposeHeadRoutes: false,
     logger: false,
   });
+  app.register(multipart, { limits: { parts: 2, files: 1, fields: 0, fileSize: maxAttachmentBytes + 1 } });
+  app.addHook('onClose', () => artifactJobs.close());
 
   app.decorate('subscribe', (taskId: string, afterSeq: number, signal: AbortSignal, pollMs?: number) =>
     readTaskEvents(repository, taskId, afterSeq, signal, pollMs));
@@ -39,7 +55,15 @@ export function createHttpApp({
     }
     if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
       if (!isAllowedWriteOrigin(headers)) return sendError(reply, 403, 'VALIDATION_FAILED', '请求来源无效。');
-      if (!isJson(headers['content-type'])) return sendError(reply, 415, 'VALIDATION_FAILED', '写入请求必须使用 JSON。');
+      const upload = request.routeOptions.url === '/api/v1/projects/:projectId/attachments';
+      const bodyless = request.routeOptions.url === '/api/v1/connections/:id/credential'
+        || request.routeOptions.url === '/api/v1/connections/:id/probe';
+      if (upload && !/^multipart\/form-data(?:\s*;|$)/i.test(headers['content-type'] ?? '')) {
+        return sendError(reply, 415, 'VALIDATION_FAILED', '附件上传必须使用 multipart/form-data。');
+      }
+      if (!upload && !isJson(headers['content-type']) && !(bodyless && !headers['content-type'])) {
+        return sendError(reply, 415, 'VALIDATION_FAILED', '写入请求必须使用 JSON。');
+      }
     }
   });
 
@@ -53,10 +77,14 @@ export function createHttpApp({
   app.setErrorHandler((error, _request, reply) => {
     const value = error as Partial<HttpServiceError> & { statusCode?: number };
     const status = value.statusCode ?? 500;
-    const code = status === 400 || status === 413 ? 'VALIDATION_FAILED'
+    const upload = _request.routeOptions.url === '/api/v1/projects/:projectId/attachments';
+    const code = upload && status === 413 ? 'LIMIT_EXCEEDED'
+      : status === 400 || status === 413 ? 'VALIDATION_FAILED'
       : status === 500 ? 'CONNECTION_UNAVAILABLE'
         : value.code ?? 'VALIDATION_FAILED';
-    const message = status === 400 ? 'JSON 格式无效。'
+    const message = status >= 500 && status !== 503 && status !== 504 ? '工作台暂时无法处理请求。'
+      : upload && status === 413 ? '附件超过 20 MiB 限制。'
+      : status === 400 ? (upload ? '附件上传请求格式无效。' : 'JSON 格式无效。')
       : status === 413 ? 'JSON 请求超过 1 MiB 限制。'
         : value.message ?? '工作台暂时无法处理请求。';
     return sendError(reply, status, code, message, value.field, value.retryable ?? false, value.taskId);
@@ -65,6 +93,29 @@ export function createHttpApp({
   app.setNotFoundHandler((_request, reply) => sendError(reply, 404, 'VALIDATION_FAILED', '未找到接口。'));
 
   app.get('/api/v1/projects', async (_request, reply) => sendData(reply, 200, projects.listProjects()));
+  app.get('/api/v1/connections', async (_request, reply) => sendData(reply, 200, connections.list()));
+  app.post('/api/v1/connections', async (request, reply) => sendData(reply, 201, await connections.create(request.body)));
+  app.patch<{ Params: { id: string } }>('/api/v1/connections/:id', async (request, reply) =>
+    sendData(reply, 200, await connections.update(pathId(request.params.id), request.body)));
+  app.delete<{ Params: { id: string } }>('/api/v1/connections/:id/credential', async (request, reply) => {
+    await connections.clearCredential(pathId(request.params.id));
+    return reply.code(204).send();
+  });
+  app.post<{ Params: { id: string } }>('/api/v1/connections/:id/probe', async (request, reply) =>
+    sendData(reply, 200, await connections.probe(pathId(request.params.id))));
+  app.get('/api/v1/settings', async (_request, reply) => sendSettings(reply, settings.read('global')));
+  app.put<{ Body: unknown }>('/api/v1/settings', async (request, reply) => sendSettings(reply,
+    settings.save('global', objectBody(request.body).values, request.headers['if-match'] ?? null)));
+  app.get<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/settings', async (request, reply) => {
+    const projectId = pathId(request.params.projectId);
+    if (!repository.getProject(projectId)) throw httpError('VALIDATION_FAILED', 404, '未找到项目。');
+    return sendSettings(reply, settings.read(`project:${projectId}`));
+  });
+  app.put<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId/settings', async (request, reply) => {
+    const projectId = pathId(request.params.projectId);
+    if (!repository.getProject(projectId)) throw httpError('VALIDATION_FAILED', 404, '未找到项目。');
+    return sendSettings(reply, settings.save(`project:${projectId}`, objectBody(request.body).values, request.headers['if-match'] ?? null));
+  });
   app.post<{ Body: unknown }>('/api/v1/projects', async (request, reply) =>
     sendData(reply, 201, projects.createProject(request.body)));
 
@@ -82,13 +133,30 @@ export function createHttpApp({
     sendData(reply, 200, projects.listArtifacts(
       pathId(request.params.projectId), requestSearchParams(request).get('kind') ?? undefined,
     )));
+  app.post<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/attachments', async (request, reply) => {
+    const parts = request.parts();
+    const first = await parts.next();
+    if (first.done || first.value.type !== 'file') {
+      throw httpError('VALIDATION_FAILED', 422, '请上传一个 file 附件。');
+    }
+    const { filename, mimetype, fieldname } = first.value;
+    const bytes = await first.value.toBuffer();
+    if (!(await parts.next()).done) throw httpError('VALIDATION_FAILED', 422, '一次只能上传一个附件。');
+    if (fieldname !== 'file') throw httpError('VALIDATION_FAILED', 422, '请上传一个 file 附件。');
+    return sendData(reply, 201, await artifactJobs.upload(pathId(request.params.projectId), filename, mimetype, bytes));
+  });
+  app.post<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/speech-preview', async (request, reply) =>
+    sendData(reply, 202, artifactJobs.preview(pathId(request.params.projectId), objectBody(request.body))));
 
   app.get<{ Params: { taskId: string } }>('/api/v1/tasks/:taskId', async (request, reply) =>
     sendData(reply, 200, projects.getTask(pathId(request.params.taskId))));
   app.post<{ Params: { taskId: string }; Body: unknown }>('/api/v1/tasks/:taskId/input', async (request, reply) =>
     sendData(reply, 200, await projects.respondInput(pathId(request.params.taskId), request.body)));
   app.post<{ Params: { taskId: string } }>('/api/v1/tasks/:taskId/cancel', async (request, reply) => {
-    const cancelled = await projects.cancelTask(pathId(request.params.taskId));
+    const taskId = pathId(request.params.taskId);
+    const task = repository.getTask(taskId);
+    if (task && artifactJobs.cancel(task)) return sendData(reply, 202, projects.getTask(taskId));
+    const cancelled = await projects.cancelTask(taskId);
     return sendData(reply, cancelled.statusCode, cancelled.data);
   });
 
@@ -161,6 +229,16 @@ function requestSearchParams(request: FastifyRequest): URLSearchParams {
 
 function sendData(reply: FastifyReply, status: number, data: unknown) {
   return reply.code(status).send({ data });
+}
+
+function sendSettings(reply: FastifyReply, data: ReturnType<ReturnType<typeof createSettingsService>['read']>) {
+  reply.header('ETag', `"${data.editToken}"`);
+  return sendData(reply, 200, data);
+}
+
+function objectBody(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw httpError('VALIDATION_FAILED', 422, '请求体必须是对象。');
+  return value as Record<string, unknown>;
 }
 
 function sendError(reply: FastifyReply, status: number, code: string, message: string, field?: string, retryable = false, taskId?: string) {

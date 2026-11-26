@@ -41,6 +41,7 @@ export function createProjectsService(
   const defaultConnection: ResolvedConnection = adapters.defaultConnection ?? {
     id: 'codex-local', kind: 'codex', provider: 'codex', model: '',
   };
+  ensureDefaultConnection(repository, defaultConnection);
 
   return {
     createProject(body: unknown) {
@@ -57,17 +58,17 @@ export function createProjectsService(
         currentSourceId: null, currentVideoId: null, createdAt: now, updatedAt: now,
       };
       repository.saveProject(project);
-      return projectDto(repository, project);
+      return projectDto(repository, project, defaultConnection.id);
     },
 
     listProjects() {
-      return repository.listProjects().map((project) => projectDto(repository, project));
+      return repository.listProjects().map((project) => projectDto(repository, project, defaultConnection.id));
     },
 
     getProject(projectId: string) {
       const project = repository.getProject(projectId);
       if (!project) throw httpError('VALIDATION_FAILED', 404, '找不到此项目。');
-      return projectDto(repository, project);
+      return projectDto(repository, project, defaultConnection.id);
     },
 
     updateProject(projectId: string, body: unknown) {
@@ -87,14 +88,13 @@ export function createProjectsService(
         }
       }
       const updated = repository.updateProject({ ...current, title, brief, connectionId, updatedAt: new Date().toISOString() });
-      return projectDto(repository, updated);
+      return projectDto(repository, updated, defaultConnection.id);
     },
 
     listMessages(projectId: string, query: URLSearchParams) {
       const project = repository.getProject(projectId);
       if (!project) throw httpError('VALIDATION_FAILED', 404, '找不到此项目。');
-      const conversations = repository.listConversations(projectId);
-      const conversationId = query.get('conversationId') || conversations[0]?.id;
+      const conversationId = query.get('conversationId') || currentConversation(repository, project, defaultConnection.id);
       if (!conversationId) return { items: [], nextAfterId: null };
       const conversation = repository.getConversation(conversationId, projectId);
       if (!conversation) throw httpError('VALIDATION_FAILED', 404, '找不到此项目的对话。');
@@ -116,11 +116,11 @@ export function createProjectsService(
       const text = requiredText(input.text, 'text', 12_000);
       const connectionId = optionalId(input.connectionId, 'connectionId') ?? project.connectionId ?? defaultConnection.id;
       const connection = repository.getConnection(connectionId);
-      if (!connection && connectionId !== defaultConnection.id) throw httpError('CONNECTION_UNAVAILABLE', 503, '所选连接不可用。');
+      if (!connection?.enabled || connection.kind !== 'codex_app_server') throw httpError('CONNECTION_UNAVAILABLE', 503, '所选连接不可用。');
       if (purpose === 'system') {
         throw httpError('REQUIREMENTS_UNCONFIRMED', 422, '请先在工作台确认制作范围。');
       }
-      if (purpose !== 'discuss') {
+      if (purpose !== 'discuss' && purpose !== 'requirements') {
         throw httpError('CAPABILITY_UNSUPPORTED', 422, '此工作台版本暂不支持该任务类型。');
       }
       const request = {
@@ -140,7 +140,6 @@ export function createProjectsService(
       if (repository.listTasks(projectId).some((task) => activeStates.has(task.state))) {
         throw httpError('RESOURCE_BUSY', 409, '该项目已有任务正在执行。');
       }
-      ensureDefaultConnection(repository, defaultConnection);
       const now = new Date().toISOString();
       let conversation: ConversationRecord;
       if (input.conversationId !== undefined) {
@@ -176,15 +175,33 @@ export function createProjectsService(
         nativeSessionRef: conversation.nativeSessionRef,
         limits: { maxSteps: 30, timeoutMs: 260_000, maxOutputBytes: 1_048_576 },
       };
+      if (purpose === 'requirements' && !aiInput.context.attachmentIndex?.length) {
+        throw httpError('VALIDATION_FAILED', 422, '请先上传附件并等待提取成功。');
+      }
       task.input = { messageId: message.id, purpose, text };
-      repository.transaction((tx) => {
+      const duplicate = repository.transaction((tx) => {
+        const previous = tx.getTaskByRequest(projectId, requestId);
+        if (previous) {
+          if (stableStringify(previous.request) !== stableStringify(request)) {
+            throw httpError('REQUEST_CONFLICT', 409, '同一 requestId 已用于不同请求。');
+          }
+          return previous;
+        }
+        if (JSON.stringify(tx.getConnection(connectionId)) !== JSON.stringify(connection)) {
+          throw httpError('EDIT_CONFLICT', 409, '任务所用连接已变更，请重试。');
+        }
+        if (tx.listTasks(projectId).some((entry) => activeStates.has(entry.state))) {
+          throw httpError('RESOURCE_BUSY', 409, '该项目已有任务正在执行。');
+        }
         const updatedProject = { ...project, updatedAt: now };
         tx.updateProject(updatedProject);
         tx.saveConversation(conversation);
         tx.saveTask(task);
         tx.saveMessage({ ...message, taskId: task.id });
         tx.appendEvent({ taskId: task.id, type: 'task.started', payload: { state: 'queued' }, createdAt: now });
+        return null;
       });
+      if (duplicate) return acceptedTask(duplicate);
       try {
         await tasks.startAi(aiInput);
         const current = tasks.get(task.id);
@@ -262,7 +279,12 @@ export function createProjectsService(
       if (kind && !['attachment', 'source', 'plan', 'script', 'capture', 'media', 'video', 'log'].includes(kind)) {
         throw httpError('VALIDATION_FAILED', 422, '成果类型无效。', 'kind');
       }
-      return repository.listArtifacts(projectId, kind as ArtifactRecord['kind'] | undefined).map(artifactDto);
+      return repository.listArtifacts(projectId, kind as ArtifactRecord['kind'] | undefined).map((artifact) => {
+        const dto = artifactDto(artifact);
+        if (artifact.kind !== 'attachment' || !artifact.taskId) return dto;
+        const task = repository.getTask(artifact.taskId);
+        return { ...dto, extractionState: task?.state ?? null, extractionError: task?.error ?? null };
+      });
     },
 
     getArtifact(projectId: string, artifactId: string) {
@@ -306,7 +328,12 @@ async function finishTask(
     if (summary.state === 'succeeded' && result) {
       const assistant: MessageRecord = {
         id: `m-${randomUUID()}`, conversationId: conversation.id, taskId: task.id, role: 'assistant',
-        text: result.reply, toolCallId: null, state: 'complete', createdAt: now,
+        text: result.delivery?.kind === 'requirements'
+          ? [result.reply, '待人工确认的需求条目', ...result.delivery.items.map((item, index) =>
+            [`${index + 1}. ${item.text}`, `预期结果：${item.outcome}`, item.sourceRef
+              ? `出处：${item.sourceRef.artifactId} ${item.sourceRef.locator}\n${item.sourceRef.quote}` : '来源：项目描述或对话'].join('\n')
+          )].join('\n\n') : result.reply,
+        toolCallId: null, state: 'complete', createdAt: now,
       };
       repository.transaction((tx) => {
         tx.saveConversation({ ...conversation, nativeSessionRef: result.nativeSessionRef || conversation.nativeSessionRef, updatedAt: now });
@@ -341,8 +368,11 @@ function ensureDefaultConnection(repository: StudioRepository, connection: Resol
   });
 }
 
-function projectDto(repository: StudioRepository, project: ProjectRecord) {
-  const conversations = repository.listConversations(project.id);
+function currentConversation(repository: StudioRepository, project: ProjectRecord, defaultConnectionId: string) {
+  return repository.listConversations(project.id).find((item) => item.connectionId === (project.connectionId ?? defaultConnectionId))?.id ?? null;
+}
+
+function projectDto(repository: StudioRepository, project: ProjectRecord, defaultConnectionId: string) {
   return {
     id: project.id,
     title: project.title,
@@ -351,7 +381,7 @@ function projectDto(repository: StudioRepository, project: ProjectRecord) {
     connectionId: project.connectionId,
     currentSourceId: project.currentSourceId,
     currentVideoId: project.currentVideoId,
-    currentConversationId: conversations[0]?.id ?? null,
+    currentConversationId: currentConversation(repository, project, defaultConnectionId),
     activeTasks: repository.listTasks(project.id).filter((task) => activeStates.has(task.state)).map((task) => task.id),
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,

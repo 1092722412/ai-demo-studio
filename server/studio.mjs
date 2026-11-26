@@ -7,6 +7,7 @@ import { createHttpApp } from '../dist-server/http.js';
 import { CodexAppServerManager } from '../dist-server/ai/codex-app-server.js';
 import { initializeStore } from '../dist-server/store/repository.js';
 import { TaskService } from '../dist-server/tasks.js';
+import { resolveConnection } from '../dist-server/connections.js';
 
 const applicationRoot = fileURLToPath(new URL('..', import.meta.url));
 const skillRelativePath = '.agents/skills/bid-demo-system/SKILL.md';
@@ -39,7 +40,9 @@ export async function createStudio({
     createRuntime: async (input) => {
       const projectRoot = join(projectDirectory, input.projectId);
       await mkdir(projectRoot, { recursive: true });
-      return { connection: defaultConnection, projectRoot, tools };
+      const task = repository.getTask(input.taskId);
+      const connection = repository.getConnection(task?.connectionId ?? defaultConnection.id);
+      return { connection: connection ? resolveConnection(connection) : defaultConnection, projectRoot, tools };
     },
     onEvent: (taskId, event) => {
       const task = repository.getTask(taskId);
@@ -80,15 +83,19 @@ export async function createStudio({
         requirements: [],
         messages: messages.slice(-50).map(({ role, text }) => ({ role: role === 'assistant' ? 'assistant' : 'user', text })),
         fileIndex: repository.listArtifacts(project.id)
-          .filter((artifact) => artifact.state === 'available')
+          .filter((artifact) => artifact.state === 'available' && artifact.kind === 'source')
           .map((artifact) => ({ artifactId: artifact.id, path: artifact.relativePath, bytes: artifact.bytes })),
+        attachmentIndex: repository.listArtifacts(project.id, 'attachment')
+          .filter((artifact) => artifact.state === 'available' && artifact.taskId && repository.getTask(artifact.taskId)?.state === 'succeeded')
+          .map((artifact) => ({ artifactId: artifact.id, path: artifact.relativePath, bytes: artifact.bytes,
+            mime: artifact.mime, name: artifact.metadata?.name ?? artifact.id })),
         skill,
         toolNames: ['get_demo_brief', 'load_bid_demo_system_skill', 'get_current_source'],
       };
     },
   };
 
-  const app = createHttpApp({ repository, tasks, adapters });
+  const app = createHttpApp({ repository, tasks, adapters, connectionProbes: { codex_app_server: adapter } });
   app.get('/', async (_request, reply) => {
     try {
       const html = await readFile(join(applicationRoot, 'dist', 'index.html'));

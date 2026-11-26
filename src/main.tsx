@@ -3,16 +3,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
   ArrowRight, Check, ChevronDown, CircleAlert, CircleCheck, Film, Layers3, LoaderCircle,
-  MessageSquare, Monitor, Plus, ScanLine, Send, Sparkles, Square, X,
+  MessageSquare, Monitor, Plus, ScanLine, Send, Settings, Sparkles, Square, X,
 } from 'lucide-react';
 import { api, isTaskActive } from './api';
-import type { Message, Project, Task, TaskEvent } from './api';
+import type { Attachment, Message, Project, Task, TaskEvent } from './api';
+import { SettingsPanel } from './SettingsPanel';
 import { useTaskEvents } from './useTaskEvents';
 import './style.css';
 
 type Brief = { title: string; requirement: string };
 type Activity = { callId: string | null; label: string; status: 'running' | 'done' | 'failed' };
-type View = 'build' | 'handoff';
+type View = 'build' | 'handoff' | 'settings';
 type WaitingInput = {
   requestId: string;
   description: string;
@@ -198,7 +199,7 @@ function App() {
       const label = String(event.payload.label ?? event.payload.phase ?? '任务进度');
       setActivity((current) => [...current, { callId: null, label, status: 'running' }]);
       if (event.payload.phase === 'cancelling' && currentTask) setTask({ ...currentTask, state: 'cancelling' });
-    } else if (event.type.startsWith('task.')) {
+    } else if (['task.succeeded', 'task.failed', 'task.cancelled', 'task.interrupted'].includes(event.type)) {
       const state: Task['state'] = event.type === 'task.succeeded' ? 'succeeded'
         : event.type === 'task.cancelled' ? 'cancelled'
           : event.type === 'task.interrupted' ? 'interrupted' : 'failed';
@@ -270,7 +271,7 @@ function App() {
     updateAddress(null);
   }
 
-  async function submitMessage(text: string, currentProject: Project, conversationId?: string | null) {
+  async function submitMessage(text: string, currentProject: Project, conversationId?: string | null, purpose: 'discuss' | 'requirements' = 'discuss') {
     const requestId = crypto.randomUUID();
     setSubmitting(true);
     setError('');
@@ -279,7 +280,7 @@ function App() {
       const accepted = await api.postMessage(currentProject.id, {
         requestId,
         ...(conversationId ? { conversationId } : {}),
-        purpose: 'discuss',
+        purpose,
         text,
       });
       const updatedProject = { ...currentProject, currentConversationId: accepted.conversationId };
@@ -293,6 +294,21 @@ function App() {
     } catch (reason) {
       setError(errorMessage(reason));
       setActivity((items) => items.map((item) => item.status === 'running' ? { ...item, status: 'failed' } : item));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function uploadAttachment(file: File, currentProject: Project) {
+    setSubmitting(true);
+    setError('');
+    try {
+      const accepted = await api.uploadAttachment(currentProject.id, file);
+      const next = await api.getTask(accepted.taskId);
+      setTask(next);
+      taskRef.current = next;
+    } catch (reason) {
+      setError(errorMessage(reason));
     } finally {
       setSubmitting(false);
     }
@@ -392,13 +408,15 @@ function App() {
           aria-current={view === 'build' ? 'page' : undefined}><Layers3 size={20} /> 需求与预览</button>
         <button className={view === 'handoff' ? 'nav-item active' : 'nav-item'} onClick={() => setView('handoff')}
           aria-current={view === 'handoff' ? 'page' : undefined}><Film size={20} /> 录制与审片</button>
+        <button className={view === 'settings' ? 'nav-item active' : 'nav-item'} onClick={() => setView('settings')}
+          aria-current={view === 'settings' ? 'page' : undefined}><Settings size={20} /> 设置</button>
       </nav>
       <div className="local"><i />本地工作台</div>
     </aside>
 
     <main className="workspace">
       <header className="page-header">
-        <h1>{view === 'build' ? '需求讨论与预览' : '录制与审片'}</h1>
+        <h1>{view === 'build' ? '需求讨论与预览' : view === 'settings' ? '设置' : '录制与审片'}</h1>
         <span className="agent"><span />本机 Codex</span>
       </header>
       {view === 'build' ? <>
@@ -416,6 +434,9 @@ function App() {
               <Conversation messages={messages} task={task} activity={activity} waitingInput={waitingInput} submitting={submitting} activityOpen={activityOpen}
                 onActivityOpenChange={setActivityOpen} draft={draft} onDraftChange={setDraft}
                 onSend={sendMessage} onCancel={() => void cancelTask()} onRespondInput={(value) => void respondInput(value)} />
+              <Attachments key={project.id} projectId={project.id} task={task} busy={submitting || active}
+                onUpload={(file) => void uploadAttachment(file, project)}
+                onOrganize={() => void submitMessage('请读取本项目已提取的材料，整理需要演示的条目、预期结果及原文出处，供人工确认。', project, project.currentConversationId, 'requirements')} />
               <details className="brief-details">
                 <summary>演示需求</summary>
                 <form id="brief" onSubmit={saveBrief}>
@@ -450,7 +471,7 @@ function App() {
             </div>
             <div className="empty-stage">
               <div className="stage-icon">{active ? <LoaderCircle className="spin" size={36} /> : <Monitor size={38} />}</div>
-              <strong>{active ? task?.state === 'cancelling' ? '正在停止任务' : '正在讨论需求' : '系统生成待接入'}</strong>
+              <strong>{active ? task?.state === 'cancelling' ? '正在停止任务' : task?.kind === 'build' ? '正在提取附件' : '正在处理需求' : '系统生成待接入'}</strong>
               <span>{active ? '调用过程会在左侧更新。' : '当前可以通过 Codex 讨论和整理需求；确认范围与系统生成将在后续步骤接入。'}</span>
             </div>
           </section>
@@ -461,7 +482,12 @@ function App() {
             {submitting ? <LoaderCircle className="spin" size={17} /> : <Send size={17} />} {submitting ? '提交中' : '开始讨论'}
           </button>}
         </footer>
-      </> : <section className="panel handoff">
+      </> : view === 'settings' ? <SettingsPanel project={project} busy={active || submitting} onProjectChange={(updated) => {
+        if (updated.id !== project?.id) return;
+        setProject(updated);
+        setProjects((items) => items.map((item) => item.id === updated.id ? updated : item));
+        void refreshMessages(updated.id, updated.currentConversationId).catch((reason) => setError(errorMessage(reason)));
+      }} /> : <section className="panel handoff">
         <div className="panel-head"><h2>录制准备</h2></div>
         <div className="handoff-body">
           <p>项目 <strong>{project?.title || '尚未选择'}</strong></p>
@@ -471,6 +497,37 @@ function App() {
       </section>}
     </main>
   </div>;
+}
+
+function Attachments({ projectId, task, busy, onUpload, onOrganize }: {
+  projectId: string; task: Task | null; busy: boolean; onUpload: (file: File) => void; onOrganize: () => void;
+}) {
+  const [items, setItems] = useState<Attachment[]>([]);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let alive = true;
+    void api.listAttachments(projectId).then((attachments) => { if (alive) setItems(attachments); })
+      .catch((reason) => { if (alive) setError(errorMessage(reason)); });
+    return () => { alive = false; };
+  }, [projectId, task?.taskId, task?.state]);
+  return <details className="brief-details">
+    <summary>参考材料{items.length ? `（${items.length}）` : ''}</summary>
+    <div className="handoff-body settings-body">
+      {error && <p role="alert">{error}</p>}
+      <label>上传参考文件<input type="file" accept=".txt,.md,.markdown,.json,.csv,.pdf,.docx" disabled={busy} onChange={(event) => {
+        const file = event.currentTarget.files?.[0];
+        event.currentTarget.value = '';
+        if (file) onUpload(file);
+      }} /></label>
+      {items.length > 0 && <ul>{items.map((item) => <li key={item.id}>
+        <a href={`/api/v1/artifacts/${encodeURIComponent(item.id)}/content?projectId=${encodeURIComponent(projectId)}&download=1`}>
+          {item.metadata?.name ?? item.id}
+        </a> · {item.extractionState === 'succeeded' ? '已提取' : item.extractionError?.message ?? '等待提取'}
+      </li>)}</ul>}
+      <button type="button" className="text-button" disabled={busy || !items.some((item) => item.extractionState === 'succeeded')}
+        onClick={onOrganize}>整理附件需求</button>
+    </div>
+  </details>;
 }
 
 createRoot(document.getElementById('root')!).render(<App />);
