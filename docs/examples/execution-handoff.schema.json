@@ -1,0 +1,748 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-demo-studio.invalid/schema/execution-handoff.schema.json",
+  "title": "脚本、采集与媒体交接设计稿",
+  "description": "设计数据，尚未接入运行代码。字段引用由服务解析；时间关系和资源可用性另作语义校验。",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/script"
+    },
+    {
+      "$ref": "#/$defs/capture"
+    },
+    {
+      "$ref": "#/$defs/media"
+    }
+  ],
+  "$defs": {
+    "rect": {
+      "type": "object",
+      "properties": {
+        "x": {
+          "type": "number",
+          "minimum": 0
+        },
+        "y": {
+          "type": "number",
+          "minimum": 0
+        },
+        "width": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "height": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ],
+      "additionalProperties": false
+    },
+    "cue": {
+      "type": "object",
+      "properties": {
+        "startMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endMs": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "startMs",
+        "endMs",
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "anchor": {
+          "enum": [
+            "start",
+            "verified",
+            "end"
+          ]
+        },
+        "atMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "rects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rectPx": {
+                "$ref": "#/$defs/rect"
+              }
+            },
+            "required": [
+              "target",
+              "rectPx"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "stepId",
+        "anchor",
+        "atMs"
+      ],
+      "additionalProperties": false
+    },
+    "observedCheck": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "op": {
+          "enum": [
+            "visible",
+            "checked",
+            "count",
+            "value",
+            "contains"
+          ]
+        },
+        "expected": {
+          "type": [
+            "boolean",
+            "number",
+            "string"
+          ]
+        },
+        "actual": {
+          "type": [
+            "boolean",
+            "number",
+            "string",
+            "null"
+          ]
+        },
+        "passed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stepId",
+        "target",
+        "op",
+        "expected",
+        "actual",
+        "passed"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "visible",
+                  "checked"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "boolean"
+              },
+              "actual": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "const": "count"
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "actual": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "op": {
+                "enum": [
+                  "value",
+                  "contains"
+                ]
+              }
+            },
+            "required": [
+              "op"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "string"
+              },
+              "actual": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "script": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "script"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "planToken": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entry": {
+          "const": "execute.py"
+        },
+        "planFile": {
+          "const": "plan.json"
+        },
+        "preparationFile": {
+          "const": "preparation.json"
+        },
+        "supportedActions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "observe",
+              "click",
+              "replaceAscii",
+              "press",
+              "scroll",
+              "refresh"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "kind",
+        "projectId",
+        "sourceArtifactId",
+        "planToken",
+        "entry",
+        "planFile",
+        "preparationFile",
+        "supportedActions"
+      ],
+      "additionalProperties": false
+    },
+    "preparation": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "const": "projectData"
+        },
+        "strategy": {
+          "enum": [
+            "keep",
+            "seed",
+            "custom"
+          ]
+        },
+        "state": {
+          "type": [
+            "object",
+            "array"
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "strategy"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "strategy": {
+                "const": "custom"
+              }
+            },
+            "required": [
+              "strategy"
+            ]
+          },
+          "then": {
+            "required": [
+              "state"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "state"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "capture": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "capture"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rawArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "scriptArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sourceArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "durationMs": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "widthPx": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "heightPx": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timebase": {
+          "type": "object",
+          "properties": {
+            "unit": {
+              "const": "ms"
+            },
+            "origin": {
+              "const": "firstVideoFrame"
+            },
+            "syncSamples": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "monotonicMs": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "videoMs": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "monotonicMs",
+                  "videoMs"
+                ],
+                "additionalProperties": false
+              },
+              "minItems": 2
+            }
+          },
+          "required": [
+            "unit",
+            "origin",
+            "syncSamples"
+          ],
+          "additionalProperties": false
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/event"
+          },
+          "minItems": 1
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/observedCheck"
+          },
+          "minItems": 1
+        },
+        "plan": {
+          "$ref": "demo-contract.schema.json"
+        },
+        "audio": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "narrationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "artifactId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "durationMs": {
+                "type": "number",
+                "exclusiveMinimum": 0
+              },
+              "cues": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/cue"
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "narrationId",
+              "artifactId",
+              "durationMs",
+              "cues"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "kind",
+        "projectId",
+        "taskId",
+        "scriptArtifactId",
+        "sourceArtifactId",
+        "complete",
+        "plan"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "complete": {
+                "const": true
+              }
+            },
+            "required": [
+              "complete"
+            ]
+          },
+          "then": {
+            "required": [
+              "kind",
+              "projectId",
+              "taskId",
+              "rawArtifactId",
+              "scriptArtifactId",
+              "sourceArtifactId",
+              "complete",
+              "durationMs",
+              "widthPx",
+              "heightPx",
+              "timebase",
+              "events",
+              "checks",
+              "plan",
+              "audio"
+            ]
+          }
+        }
+      ]
+    },
+    "overlay": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "box",
+            "card"
+          ]
+        },
+        "startMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endMs": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "z": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rectPx": {
+          "$ref": "#/$defs/rect"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#[A-Fa-f0-9]{6}$"
+        },
+        "position": {
+          "enum": [
+            "upperSafe",
+            "lowerSafe"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "startMs",
+        "endMs",
+        "z"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "box"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "target",
+              "rectPx",
+              "color"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "card"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "text",
+              "position"
+            ]
+          }
+        }
+      ]
+    },
+    "segment": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "startMs": {
+          "type": "number",
+          "minimum": 0
+        },
+        "endMs": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "narrationId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "audioArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cues": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cue"
+          },
+          "minItems": 0
+        },
+        "overlays": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/overlay"
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "stepId",
+        "startMs",
+        "endMs",
+        "cues",
+        "overlays"
+      ],
+      "additionalProperties": false,
+      "dependentRequired": {
+        "narrationId": [
+          "audioArtifactId"
+        ],
+        "audioArtifactId": [
+          "narrationId"
+        ]
+      }
+    },
+    "media": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "media"
+        },
+        "projectId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "captureArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "rawArtifactId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "profile": {
+          "$ref": "demo-contract.schema.json#/$defs/profile"
+        },
+        "segments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/segment"
+          },
+          "minItems": 1
+        },
+        "timelineArtifactId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "projectArtifactId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "videoArtifactId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "required": [
+        "kind",
+        "projectId",
+        "taskId",
+        "captureArtifactId",
+        "rawArtifactId",
+        "profile",
+        "segments",
+        "timelineArtifactId",
+        "projectArtifactId",
+        "videoArtifactId"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

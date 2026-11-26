@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>演示系统</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header><div><h1 id="title"></h1><p id="description"></p></div></header>
+  <main>
+    <section class="card" aria-label="录入">
+      <form id="record-form" data-testid="record-form">
+        <div id="fields"></div>
+        <button data-testid="record-save" id="save" disabled></button>
+        <p role="status" data-testid="record-status" id="status"></p>
+      </form>
+    </section>
+    <section class="card" aria-labelledby="list-title">
+      <h2 id="list-title"></h2>
+      <div id="records" data-testid="record-list"></div>
+    </section>
+  </main>
+  <script type="module" src="/demo.mjs"></script>
+</body>
+</html>
