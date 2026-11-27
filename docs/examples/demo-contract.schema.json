@@ -811,5 +811,5 @@
       }
     }
   ],
-  "description": "待实现的方案交接格式。schemaVersion 仅为解析格式标识；本文件不被当前工作台读取。"
+  "description": "工作台当前方案的交接格式。schemaVersion 用于区分解析格式。"
 }

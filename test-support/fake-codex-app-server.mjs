@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const mode = process.env.FAKE_CODEX_MODE || 'success';
@@ -15,10 +15,16 @@ let turnId = '';
 let turnCounter = 0;
 const activeTurns = new Map();
 
-async function finishTurn(status = 'completed', output = process.env.FAKE_CODEX_OUTPUT || '{"reply":"已完成讨论。","project":null}') {
+async function finishTurn(status = 'completed', output) {
   if (!turnId) return;
+  const context = process.argv[2] ? JSON.parse(readFileSync(process.argv[2], 'utf8')) : null;
   if (status === 'completed') {
-    await sendReceipts();
+    if (context) trace({ event: 'context', purpose: context.purpose,
+      requirements: context.requirements, fileIndex: context.fileIndex });
+    await sendReceipts(context);
+    const outputs = JSON.parse(process.env.FAKE_CODEX_OUTPUTS || '{}');
+    output ??= outputs[context?.purpose] ? JSON.stringify(outputs[context.purpose])
+      : process.env.FAKE_CODEX_OUTPUT || '{"reply":"已完成讨论。","project":null}';
     const chunks = output.match(/[\s\S]{1,11}/g) || [];
     for (const delta of chunks) notify('item/agentMessage/delta', { threadId, turnId, itemId: 'assistant-1', delta });
   }
@@ -40,12 +46,12 @@ async function sendTool(tool, args, content, callId) {
   });
 }
 
-async function sendReceipts() {
+async function sendReceipts(context) {
   if (mode !== 'missing-receipt') {
     await sendTool('load_bid_demo_system_skill', {}, process.env.FAKE_CODEX_SKILL || '', 'tool-skill');
   }
   if (mode !== 'missing-receipt') {
-    await sendTool('get_demo_brief', {}, JSON.stringify({
+    await sendTool('get_demo_brief', {}, JSON.stringify(context ?? {
       taskId: process.env.FAKE_CODEX_TASK_ID,
       projectId: process.env.FAKE_CODEX_PROJECT_ID,
       messageId: process.env.FAKE_CODEX_MESSAGE_ID,
@@ -54,10 +60,19 @@ async function sendReceipts() {
   }
   const sourceArtifactId = process.env.FAKE_CODEX_SOURCE_ARTIFACT_ID;
   if (sourceArtifactId) await sendTool('get_current_source', { artifactId: sourceArtifactId }, '<h1>已有源码</h1>', 'tool-source');
+  if (context?.fileIndex[0]) {
+    await sendTool('get_current_source', { artifactId: context.fileIndex[0].artifactId, file: 'app.js' },
+      'const readback = true;', 'tool-source');
+  }
   const attachment = process.env.FAKE_CODEX_ATTACHMENT;
   if (attachment) {
     const ref = JSON.parse(attachment);
     await sendTool('read_attachment', { artifactId: ref.artifactId, offset: 0, limit: 1 }, JSON.stringify({ sourceRefs: [ref] }), 'tool-attachment');
+  }
+  if (context?.purpose === 'requirements' && context.attachmentIndex?.[0]) {
+    const artifactId = context.attachmentIndex[0].artifactId;
+    await sendTool('read_attachment', { artifactId, offset: 0, limit: 1 },
+      JSON.stringify({ sourceRefs: [{ artifactId, locator: 'line:1', quote: '核对测试值' }] }), 'tool-attachment');
   }
 }
 

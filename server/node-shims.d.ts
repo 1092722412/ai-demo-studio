@@ -22,7 +22,14 @@ declare module 'node:buffer' {
   }
 }
 
+declare module 'node:util' {
+  export function isDeepStrictEqual(a: unknown, b: unknown): boolean;
+}
+
 declare module 'node:fs' {
+  export function readFileSync(path: URL, encoding: 'utf8'): string;
+  export function renameSync(from: string, to: string): void;
+  export function lstatSync(path: string, options: { throwIfNoEntry: false }): { size: number; isFile(): boolean } | undefined;
   export function existsSync(path: string): boolean;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): string | undefined;
   export function realpathSync(path: string): string;
@@ -45,8 +52,10 @@ declare module 'node:sqlite' {
 }
 
 declare module 'node:fs/promises' {
+  export function mkdir(path: string): Promise<void>;
   export function open(path: string, flags: string): Promise<{
     stat(): Promise<{ size: number }>;
+    createReadStream(options?: { start?: number; end?: number }): unknown;
     read(buffer: Uint8Array, offset: number, length: number, position: number): Promise<{ bytesRead: number }>;
     close(): Promise<void>;
   }>;

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { strToU8, zipSync } from 'fflate';
 import { createCodexAppServerAdapter } from '../dist-server/ai/codex-app-server.js';
 import { TaskService } from '../dist-server/tasks.js';
 
@@ -150,6 +151,23 @@ test('requirements 使用独立原生输出 Schema，保留已读取的原文引
   assert.deepEqual(started.outputSchema.required, ['reply', 'items']);
 });
 
+test('plan 使用原生草稿 Schema；有当前源码时须取得读取记录', async (t) => {
+  const input = makeInput({ purpose: 'plan' });
+  const draft = { description: '合成方案草稿' };
+  const { adapter, dataRoot, traceFile } = await createAdapter('success', input, {
+    FAKE_CODEX_OUTPUT: JSON.stringify({ reply: '已拟定方案。', draftJson: JSON.stringify(draft) }),
+  });
+  t.after(async () => { await adapter.close(); await rm(dataRoot, { recursive: true, force: true }); });
+  const events = [];
+  const result = await adapter.execute(input, makeRuntime(input, events));
+  assert.deepEqual(result.delivery, { kind: 'plan', draft });
+  assert.equal(events.filter(({ type }) => type === 'message.delta').map(({ text }) => text).join(''), '已拟定方案。');
+  const started = (await trace(traceFile)).find((entry) => entry.event === 'turn-start-request');
+  assert.deepEqual(started.outputSchema.required, ['reply', 'draftJson']);
+  input.context.fileIndex = [{ artifactId: 'a-source', path: 'source/test.zip', bytes: 50 }];
+  await assert.rejects(adapter.execute(input, makeRuntime(input, [])), { code: 'SOURCE_CHECK_FAILED' });
+});
+
 test('恢复原生线程并忽略其他 turn 与未知通知', async (t) => {
   const input = makeInput({ nativeSessionRef: 'opaque-thread-id' });
   const { adapter, dataRoot, traceFile } = await createAdapter('success', input);
@@ -265,18 +283,23 @@ test('人工输入请求进入 waiting_input，按原 JSON-RPC id 回复', async
 test('上下文 MCP 工具只读本轮上下文与索引内源码，并拒绝项目外路径', async (t) => {
   const dataRoot = await mkdtemp(join(tmpdir(), 'ai-demo-studio-mcp-'));
   const contextFile = join(dataRoot, 'context.json');
-  const sourcePath = 'test-support/fake-codex-app-server.mjs';
-  const sourceBytes = (await readFile(join(root, sourcePath))).byteLength;
+  const sourcePath = 'example.mjs';
+  const sourceText = 'const mode = "synthetic";';
+  const zip = zipSync({ [sourcePath]: strToU8(sourceText) });
+  await writeFile(join(dataRoot, sourcePath), sourceText);
+  await writeFile(join(dataRoot, 'source.zip'), zip);
   const context = {
     taskId: 'task-mcp', projectId: 'project-mcp', conversationId: 'conversation-mcp', messageId: 'message-mcp',
-    purpose: 'system', instruction: '读取合成上下文。', brief: '合成需求', requirements: [],
+    purpose: 'plan', instruction: '读取合成上下文。', brief: '合成需求', requirements: [],
+    currentPlan: { description: '合成草稿' },
     messages: [{ role: 'user', text: '查看索引文件' }],
-    fileIndex: [{ artifactId: 'source-ok', path: sourcePath, bytes: sourceBytes }],
+    fileIndex: [{ artifactId: 'source-ok', path: sourcePath, bytes: Buffer.byteLength(sourceText) },
+      { artifactId: 'source-zip', path: 'source.zip', bytes: zip.byteLength }],
     skill: { name: 'bid-demo-system', text: skillText, digest: skillDigest }, toolNames: [],
   };
   await writeFile(contextFile, JSON.stringify(context), 'utf8');
   const helper = fileURLToPath(new URL('../server/ai/context-mcp.mjs', import.meta.url));
-  const child = spawn(process.execPath, [helper, contextFile, root], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [helper, contextFile, dataRoot, root], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(async () => {
     child.kill();
     await rm(dataRoot, { recursive: true, force: true });
@@ -313,10 +336,18 @@ test('上下文 MCP 工具只读本轮上下文与索引内源码，并拒绝项
   ]);
   const brief = await request(3, 'tools/call', { name: 'get_demo_brief', arguments: {} });
   assert.match(brief.result.content[0].text, /task-mcp/);
+  const parsed = JSON.parse(brief.result.content[0].text);
+  assert.equal(parsed.planSchema.properties.schemaVersion.const, '0.3');
+  assert.deepEqual(parsed.currentPlan, context.currentPlan);
   const skill = await request(4, 'tools/call', { name: 'load_bid_demo_system_skill', arguments: {} });
   assert.equal(skill.result.content[0].text, skillText);
   const source = await request(5, 'tools/call', { name: 'get_current_source', arguments: { artifactId: 'source-ok' } });
   assert.match(source.result.content[0].text, /const mode/);
+  const entries = await request(7, 'tools/call', { name: 'get_current_source', arguments: { artifactId: 'source-zip' } });
+  assert.deepEqual(JSON.parse(entries.result.content[0].text).files, [sourcePath]);
+  const archivedSource = await request(8, 'tools/call',
+    { name: 'get_current_source', arguments: { artifactId: 'source-zip', file: sourcePath } });
+  assert.equal(archivedSource.result.content[0].text, sourceText);
   context.fileIndex = [{ artifactId: 'source-outside', path: '../README.md', bytes: 10 }];
   await writeFile(contextFile, JSON.stringify(context), 'utf8');
   const denied = await request(6, 'tools/call', { name: 'get_current_source', arguments: { artifactId: 'source-outside' } });

@@ -1,12 +1,12 @@
 # 04 演示方案与执行交接
 
-更新日期：2026-11-26。本文及配套 [Schema](examples/demo-contract.schema.json) 是待实现的数据设计，尚未被当前工作台读取。当前工作台生成输出与录制交接是另一套实现格式，入口见 [代码地图](ARCHITECTURE.md)。
+更新日期：2026-11-26。工作台已使用 [方案 Schema](examples/demo-contract.schema.json) 校验草稿和可编译方案，并使用交接 Schema 校验脚本清单与准备数据。采集和媒体交接仍属目标设计。当前服务入口见 [代码地图](ARCHITECTURE.md)。
 
 ## 契约职责
 
 契约连接“实际系统—演示方案—脚本—执行记录—视频时间轴”。它描述当前项目怎么演示，不提供产品版本管理、运行编号或复杂审批记录。
 
-格式标识 schemaVersion 为 0.3，仅用于区分解析格式，不是项目版本功能。配套文档样例已同步更新；本轮未增加运行代码中的读入器。
+格式标识 schemaVersion 为 0.3，用于区分解析格式。配套样例用于说明字段与引用。
 
 | 字段 | 用途 |
 |---|---|
@@ -53,6 +53,8 @@ HyperFrames 使用原片、音频、字幕与标注编排，画面等比保留�
 草稿 body_json 允许缺字段，GET/PUT plan 返回 issues:[{path,code,message}]，path 使用 JSON Pointer。每次保存后重新校验；结构合法并不意味着业务正确。转换为可执行方案时，服务以当前 settings 合并出的 profile 替换草稿旧 profile，校验所有引用，再交脚本编译器。方案的 profile 是可导出的配置快照，日常配置唯一来源仍为 settings。
 
 ScriptPackage 是生成脚本包内的 manifest.json，结构见 [交接 Schema](examples/execution-handoff.schema.json)。一个包固定包含 execute.py、plan.json、preparation.json、manifest.json、README.md 和所需的产品执行模块；execute.py 是产品维护的入口，Agent 提供本项目的声明式方案，不把任意模型 Python 当受信执行程序。下载包可以由用户在已安装 Node/Edge/Python/FFmpeg 的 Windows 环境手动运行，缺依赖时给具体提示，不静默安装。
+
+第 5 项交付脚本 ZIP 与标准库依赖清单，可运行 `python execute.py --check` 离线检查清单、方案及准备数据。正式执行依赖第 6 项录制 Worker。功能的源码引用可写包内路径，或在路径后加 `#` 和 UTF-8 文本片段。脚本生成会检查文件和片段存在。
 
 | ScriptPackage 字段 | 类型与来源 |
 |---|---|

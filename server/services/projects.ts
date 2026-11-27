@@ -11,6 +11,10 @@ import type {
   TaskRecord,
 } from '../store/repository.js';
 import type { TaskService, TaskState } from '../tasks.js';
+import { artifactAvailability, createArtifactService } from '../artifacts.js';
+import { invalidatePlan, PlanError, planObject } from '../plans.js';
+import { requirementsReady } from '../requirements.js';
+import { buildSystemSource } from '../system-source.js';
 
 const activeStates = new Set(['queued', 'running', 'waiting_input', 'cancelling']);
 const supportedPurposes = new Set<AiPurpose>(['discuss', 'requirements', 'system', 'plan']);
@@ -27,6 +31,7 @@ export type ProjectAdapterContext = {
   defaultConnection?: ResolvedConnection;
   getProjectRoot?: (projectId: string) => string;
   skill?: { name: string; text: string; digest: string };
+  systemSourceBuilder?: typeof buildSystemSource;
   buildContext?: (project: ProjectRecord, conversation: ConversationRecord, messages: MessageRecord[]) => AiInput['context'] | Promise<AiInput['context']>;
   tools?: { call(name: string, args: unknown, context: ToolCallContext): Promise<{ ok: boolean; data?: unknown; error?: { code: string; message: string } }> };
 };
@@ -37,11 +42,13 @@ export function createProjectsService(
   repository: StudioRepository,
   tasks: TaskService,
   adapters: ProjectAdapterContext = {},
+  retirePreview?: (projectId: string) => Promise<void>,
 ) {
   const defaultConnection: ResolvedConnection = adapters.defaultConnection ?? {
     id: 'codex-local', kind: 'codex', provider: 'codex', model: '',
   };
   ensureDefaultConnection(repository, defaultConnection);
+  const artifacts = createArtifactService(repository);
 
   return {
     createProject(body: unknown) {
@@ -87,7 +94,16 @@ export function createProjectsService(
           throw httpError('VALIDATION_FAILED', 422, '找不到此连接。', 'connectionId');
         }
       }
-      const updated = repository.updateProject({ ...current, title, brief, connectionId, updatedAt: new Date().toISOString() });
+      const updated = repository.transaction((tx) => {
+        const updatedAt = new Date().toISOString();
+        const scopeChanged = brief !== current.brief;
+        if (scopeChanged) {
+          tx.clearRequirementConfirmations(projectId);
+          invalidatePlan(tx, projectId, updatedAt);
+        }
+        return tx.updateProject({ ...current, title, brief, connectionId,
+          stage: scopeChanged ? 'requirements' : current.stage, updatedAt });
+      });
       return projectDto(repository, updated, defaultConnection.id);
     },
 
@@ -109,20 +125,14 @@ export function createProjectsService(
       if (!project) throw httpError('VALIDATION_FAILED', 404, '找不到此项目。');
       const input = asRecord(body);
       const requestId = requiredId(input.requestId, 'requestId', 128);
-      const purpose = input.purpose;
-      if (typeof purpose !== 'string' || !supportedPurposes.has(purpose as AiPurpose)) {
+      if (typeof input.purpose !== 'string' || !supportedPurposes.has(input.purpose as AiPurpose)) {
         throw httpError('VALIDATION_FAILED', 422, 'purpose 无效。', 'purpose');
       }
+      const purpose = input.purpose as AiPurpose;
       const text = requiredText(input.text, 'text', 12_000);
       const connectionId = optionalId(input.connectionId, 'connectionId') ?? project.connectionId ?? defaultConnection.id;
       const connection = repository.getConnection(connectionId);
       if (!connection?.enabled || connection.kind !== 'codex_app_server') throw httpError('CONNECTION_UNAVAILABLE', 503, '所选连接不可用。');
-      if (purpose === 'system') {
-        throw httpError('REQUIREMENTS_UNCONFIRMED', 422, '请先在工作台确认制作范围。');
-      }
-      if (purpose !== 'discuss' && purpose !== 'requirements') {
-        throw httpError('CAPABILITY_UNSUPPORTED', 422, '此工作台版本暂不支持该任务类型。');
-      }
       const request = {
         operation: 'POST /projects/:id/messages',
         conversationId: input.conversationId ?? null,
@@ -139,6 +149,10 @@ export function createProjectsService(
       }
       if (repository.listTasks(projectId).some((task) => activeStates.has(task.state))) {
         throw httpError('RESOURCE_BUSY', 409, '该项目已有任务正在执行。');
+      }
+      const requirements = repository.listRequirements(projectId);
+      if (purpose === 'system' && !requirementsReady(requirements)) {
+        throw httpError('REQUIREMENTS_UNCONFIRMED', 422, '请先在工作台确认全部制作条款。');
       }
       const now = new Date().toISOString();
       let conversation: ConversationRecord;
@@ -165,20 +179,26 @@ export function createProjectsService(
         requestId, request, createdAt: now, startedAt: null, endedAt: null,
       };
       const messages = [...repository.listMessages(conversation.id), { ...message, taskId: task.id }];
+      const plan = purpose === 'plan' ? repository.getPlan(projectId) : null;
+      const context = await buildContext(adapters, project, conversation, messages);
+      context.requirements = requirements.filter(({ confirmed }) => confirmed)
+        .map(({ id, text, outcome, sourceRef }) => ({ id, text, outcome, sourceRef }));
+      if (plan) context.currentPlan = plan.body;
       const aiInput: AiInput = {
         taskId: task.id,
         projectId,
         conversationId: conversation.id,
         purpose,
         messageId: message.id,
-        context: await buildContext(adapters, project, conversation, messages),
+        context,
         nativeSessionRef: conversation.nativeSessionRef,
         limits: { maxSteps: 30, timeoutMs: 260_000, maxOutputBytes: 1_048_576 },
       };
       if (purpose === 'requirements' && !aiInput.context.attachmentIndex?.length) {
         throw httpError('VALIDATION_FAILED', 422, '请先上传附件并等待提取成功。');
       }
-      task.input = { messageId: message.id, purpose, text };
+      task.input = { messageId: message.id, purpose, text,
+        ...(purpose === 'system' ? { requirements: context.requirements } : {}) };
       const duplicate = repository.transaction((tx) => {
         const previous = tx.getTaskByRequest(projectId, requestId);
         if (previous) {
@@ -193,7 +213,16 @@ export function createProjectsService(
         if (tx.listTasks(projectId).some((entry) => activeStates.has(entry.state))) {
           throw httpError('RESOURCE_BUSY', 409, '该项目已有任务正在执行。');
         }
-        const updatedProject = { ...project, updatedAt: now };
+        const latestProject = tx.getProject(projectId)!;
+        if (purpose === 'system' && (latestProject.brief !== project.brief
+          || latestProject.currentSourceId !== project.currentSourceId
+          || JSON.stringify(tx.listRequirements(projectId)) !== JSON.stringify(requirements))) {
+          throw httpError('EDIT_CONFLICT', 409, '制作范围或当前源码已变更，请重新发起生成。');
+        }
+        if (plan && (latestProject.currentSourceId !== project.currentSourceId || tx.getPlan(projectId)?.editToken !== plan.editToken)) {
+          throw httpError('PLAN_STALE', 409, '当前方案或源码已改变，请重新读取。');
+        }
+        const updatedProject = { ...latestProject, updatedAt: now };
         tx.updateProject(updatedProject);
         tx.saveConversation(conversation);
         tx.saveTask(task);
@@ -212,7 +241,8 @@ export function createProjectsService(
           startedAt: now,
         };
         repository.saveTask(runningTask);
-        void finishTask(repository, tasks, runningTask, conversation, message);
+        void finishTask(repository, tasks, artifacts, adapters.systemSourceBuilder ?? buildSystemSource, runningTask, conversation, message,
+          retirePreview);
         return acceptedTask(runningTask);
       } catch (error) {
         const failure = mapTaskError(error);
@@ -261,12 +291,15 @@ export function createProjectsService(
       let summary;
       try { summary = await tasks.cancel(taskId); }
       catch { throw httpError('WORKER_LOST', 409, '当前服务未持有此任务，需先核对任务状态。', undefined, true, taskId); }
-      if (isTerminal(summary.state)) {
-        const latest = repository.getTask(taskId) ?? stored;
+      const latest = repository.getTask(taskId) ?? stored;
+      // 模型返回后，系统任务仍可能处在源码构建和发布阶段。
+      if (isTerminal(latest.state) || (isTerminal(summary.state)
+        && !(latest.purpose === 'system' && summary.state === 'succeeded'))) {
         return { statusCode: 200, data: taskDto(repository, latest) };
       }
+      if (latest.state === 'cancelling') return { statusCode: 202, data: taskDto(repository, latest) };
       const now = new Date().toISOString();
-      const updated: TaskRecord = { ...stored, state: summary.state, phase: 'cancelling' };
+      const updated: TaskRecord = { ...latest, state: 'cancelling', phase: 'cancelling' };
       repository.transaction((tx) => {
         tx.saveTask(updated);
         tx.appendEvent({ taskId, type: 'task.phase', payload: { phase: 'cancelling', label: '正在停止' }, createdAt: now });
@@ -275,23 +308,39 @@ export function createProjectsService(
     },
 
     listArtifacts(projectId: string, kind?: string) {
-      if (!repository.getProject(projectId)) throw httpError('VALIDATION_FAILED', 404, '找不到此项目。');
+      const project = repository.getProject(projectId);
+      if (!project) throw httpError('VALIDATION_FAILED', 404, '找不到此项目。');
       if (kind && !['attachment', 'source', 'plan', 'script', 'capture', 'media', 'video', 'log'].includes(kind)) {
         throw httpError('VALIDATION_FAILED', 422, '成果类型无效。', 'kind');
       }
-      return repository.listArtifacts(projectId, kind as ArtifactRecord['kind'] | undefined).map((artifact) => {
-        const dto = artifactDto(artifact);
-        if (artifact.kind !== 'attachment' || !artifact.taskId) return dto;
-        const task = repository.getTask(artifact.taskId);
-        return { ...dto, extractionState: task?.state ?? null, extractionError: task?.error ?? null };
-      });
+      const plan = repository.getPlan(projectId);
+      return repository.listArtifacts(projectId, kind as ArtifactRecord['kind'] | undefined)
+        .filter((artifact) => artifact.kind !== 'source' || artifact.state !== 'available' || artifact.id === project.currentSourceId)
+        .map((artifact) => {
+          const dto = artifactDto(artifactAvailability(repository, artifact));
+          if (artifact.kind === 'source' || artifact.kind === 'video') {
+            return { ...dto, current: artifact.id === (artifact.kind === 'source' ? project.currentSourceId : project.currentVideoId) };
+          }
+          if (artifact.kind === 'script') {
+            const metadata = planObject(artifact.metadata);
+            const stale = plan?.state !== 'ready' || metadata?.planToken !== plan.editToken
+              || !project.currentSourceId || metadata?.sourceArtifactId !== project.currentSourceId;
+            return { ...dto, stale };
+          }
+          if (artifact.kind !== 'attachment' || !artifact.taskId) return dto;
+          const task = repository.getTask(artifact.taskId);
+          return { ...dto, extractionState: task?.state ?? null, extractionError: task?.error ?? null };
+        });
     },
 
-    getArtifact(projectId: string, artifactId: string) {
-      const file = repository.getArtifactPath(projectId, artifactId);
-      if (!file) throw httpError('VALIDATION_FAILED', 404, '找不到此项目中的文件。');
-      if (file.artifact.state !== 'available' || !file.path) throw httpError('VALIDATION_FAILED', 404, '此文件当前不可读取。');
-      return { artifact: file.artifact, path: file.path };
+    getArtifact(projectId: string, artifactId: string, download: boolean) {
+      let file;
+      try { file = repository.getArtifactPath(projectId, artifactId); }
+      catch { throw httpError('VALIDATION_FAILED', 404, '找不到此项目中的文件。'); }
+      if (!file || (file.artifact.state !== 'available' && !(download && file.artifact.state === 'partial'))) {
+        throw httpError('VALIDATION_FAILED', 404, '此文件当前不可读取。');
+      }
+      return file;
     },
   };
 }
@@ -317,15 +366,20 @@ async function buildContext(
 async function finishTask(
   repository: StudioRepository,
   tasks: TaskService,
+  artifacts: ReturnType<typeof createArtifactService>,
+  buildSource: typeof buildSystemSource,
   task: TaskRecord,
   conversation: ConversationRecord,
   userMessage: MessageRecord,
+  retirePreview?: (projectId: string) => Promise<void>,
 ): Promise<void> {
   try {
     const summary = await tasks.wait(task.id);
     const result = tasks.getResult(task.id);
     const now = new Date().toISOString();
-    if (summary.state === 'succeeded' && result) {
+    let state = summary.state;
+    let failure = summary.error;
+    if (state === 'succeeded' && result) {
       const assistant: MessageRecord = {
         id: `m-${randomUUID()}`, conversationId: conversation.id, taskId: task.id, role: 'assistant',
         text: result.delivery?.kind === 'requirements'
@@ -335,22 +389,58 @@ async function finishTask(
           )].join('\n\n') : result.reply,
         toolCallId: null, state: 'complete', createdAt: now,
       };
-      repository.transaction((tx) => {
-        tx.saveConversation({ ...conversation, nativeSessionRef: result.nativeSessionRef || conversation.nativeSessionRef, updatedAt: now });
+      const complete = (tx: StudioRepository, sourceArtifactId?: string) => {
+        const completedAt = new Date().toISOString();
+        const current = tx.getTask(task.id)!;
+        tx.saveConversation({ ...conversation, nativeSessionRef: result.nativeSessionRef || conversation.nativeSessionRef, updatedAt: completedAt });
         tx.saveMessage({ ...userMessage, taskId: task.id, state: 'complete' });
         tx.saveMessage(assistant);
-        tx.saveTask({ ...task, state: 'succeeded', phase: 'complete', result, endedAt: now });
-        tx.appendEvent({ taskId: task.id, type: 'task.succeeded', payload: { messageId: assistant.id }, createdAt: now });
-      });
-      return;
+        tx.saveTask({ ...current, state: 'succeeded', phase: 'complete', waitingInput: null,
+          result: sourceArtifactId ? { reply: result.reply, sourceArtifactId } : result, endedAt: completedAt });
+        tx.appendEvent({ taskId: task.id, type: 'task.succeeded',
+          payload: { messageId: assistant.id, ...(sourceArtifactId ? { sourceArtifactId } : {}) }, createdAt: completedAt });
+      };
+      if (task.purpose !== 'system') {
+        repository.transaction((tx) => complete(tx));
+        return;
+      }
+      try {
+        if (repository.getTask(task.id)?.state === 'running') {
+          if (result.delivery?.kind !== 'system') throw new PlanError('OUTPUT_INVALID', '生成任务没有交付可发布的系统。');
+          repository.transaction((tx) => {
+            tx.saveTask({ ...tx.getTask(task.id)!, phase: 'build_system' });
+            tx.appendEvent({ taskId: task.id, type: 'task.phase',
+              payload: { phase: 'build_system', label: '正在构建源码包' }, createdAt: now });
+          });
+          const file = await buildSource(result.delivery);
+          if (repository.getTask(task.id)?.state === 'running') {
+            const artifact = await artifacts.publishArtifact(task.id, file, (tx, entry) => complete(tx, entry.id));
+            if (artifact.state === 'available') {
+              await retirePreview?.(task.projectId).catch(() => {
+                console.error('已发布源码，旧预览未能完整清理。');
+              });
+              return;
+            }
+          }
+        }
+      } catch (error) {
+        failure = error instanceof PlanError ? { code: error.code, message: error.message, retryable: false }
+          : { code: 'OUTPUT_INVALID', message: '无法完成系统源码的构建或发布。', retryable: true };
+      }
+      state = 'failed';
+    } else if (state === 'succeeded') {
+      state = 'failed';
+      failure = { code: 'OUTPUT_INVALID', message: '任务未返回有效结果。', retryable: false };
     }
-    const error = summary.error ?? { code: summary.state === 'cancelled' ? 'TASK_CANCELLED' : 'WORKER_LOST', message: '任务未能完成。', retryable: true };
-    const terminalType = summary.state === 'cancelled' ? 'task.cancelled'
-      : summary.state === 'interrupted' ? 'task.interrupted' : 'task.failed';
     repository.transaction((tx) => {
+      const current = tx.getTask(task.id)!;
+      if (state !== 'interrupted' && current.state === 'cancelling') state = 'cancelled';
+      const error = state === 'cancelled' ? { code: 'TASK_CANCELLED', message: '任务已停止。', retryable: false }
+        : failure ?? { code: 'WORKER_LOST', message: '任务未能完成。', retryable: true };
+      const endedAt = new Date().toISOString();
       tx.saveMessage({ ...userMessage, taskId: task.id, state: 'complete' });
-      tx.saveTask({ ...task, state: summary.state, phase: summary.state, error, endedAt: now });
-      tx.appendEvent({ taskId: task.id, type: terminalType, payload: error, createdAt: now });
+      tx.saveTask({ ...current, state, phase: state, waitingInput: null, error, endedAt });
+      tx.appendEvent({ taskId: task.id, type: 'task.' + state, payload: error, createdAt: endedAt });
     });
   } catch {
     // 终态持久化失败时保持原任务记录，后续 GET/SSE 可继续揭示最后一次成功写入。
@@ -373,6 +463,7 @@ function currentConversation(repository: StudioRepository, project: ProjectRecor
 }
 
 function projectDto(repository: StudioRepository, project: ProjectRecord, defaultConnectionId: string) {
+  const tasks = repository.listTasks(project.id);
   return {
     id: project.id,
     title: project.title,
@@ -382,7 +473,8 @@ function projectDto(repository: StudioRepository, project: ProjectRecord, defaul
     currentSourceId: project.currentSourceId,
     currentVideoId: project.currentVideoId,
     currentConversationId: currentConversation(repository, project, defaultConnectionId),
-    activeTasks: repository.listTasks(project.id).filter((task) => activeStates.has(task.state)).map((task) => task.id),
+    activeTasks: tasks.filter((task) => activeStates.has(task.state)).map((task) => task.id),
+    latestRecordingTaskId: tasks.find((task) => task.kind === 'record')?.id ?? null,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   };

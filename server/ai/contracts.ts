@@ -15,10 +15,12 @@ export type ContextBundle = {
   requirements: Array<{
     id: string;
     text: string;
+    outcome: string;
     sourceRef: { artifactId: string; locator: string; quote: string } | null;
   }>;
   messages: Array<{ role: 'user' | 'assistant'; text: string }>;
   fileIndex: Array<{ artifactId: string; path: string; bytes: number }>;
+  currentPlan?: unknown;
   attachmentIndex?: Array<{ artifactId: string; path: string; mime: string; bytes: number; name: string }>;
   skill: { name: string; text: string; digest: string };
   toolNames: string[];

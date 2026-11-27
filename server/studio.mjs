@@ -2,21 +2,42 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { createHttpApp } from '../dist-server/http.js';
 import { CodexAppServerManager } from '../dist-server/ai/codex-app-server.js';
 import { initializeStore } from '../dist-server/store/repository.js';
 import { TaskService } from '../dist-server/tasks.js';
 import { resolveConnection } from '../dist-server/connections.js';
+import { recoverScriptPublications } from '../dist-server/scripts.js';
+import { recoverZipPublications } from '../dist-server/artifacts.js';
 
 const applicationRoot = fileURLToPath(new URL('..', import.meta.url));
 const skillRelativePath = '.agents/skills/bid-demo-system/SKILL.md';
 
-export async function createStudio({
-  dataRoot = process.env.DEMO_STUDIO_DATA_DIR || join(applicationRoot, '.studio'),
-  adapter: injectedAdapter,
-} = {}) {
+export async function createStudio({ dataRoot = process.env.DEMO_STUDIO_DATA_DIR || join(applicationRoot, '.studio'), ...options } = {}) {
   const dataDirectory = resolve(dataRoot);
+  await mkdir(dataDirectory, { recursive: true });
+  // 锁使用独立数据库，持有到服务关闭，避免同一数据根的进程互相当作重启遗留任务。
+  const lease = new DatabaseSync(join(dataDirectory, 'instance.sqlite'));
+  try {
+    lease.exec('PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE;');
+  } catch (error) {
+    lease.close();
+    if (error.errcode === 5) throw Object.assign(new Error('此数据目录已有工作台实例，请打开原实例。'), { code: 'STUDIO_BUSY' });
+    throw error;
+  }
+  try {
+    const studio = await setupStudio(dataDirectory, options);
+    let closing;
+    return { ...studio, close() { return closing ??= studio.close().finally(() => lease.close()); } };
+  } catch (error) {
+    lease.close();
+    throw error;
+  }
+}
+
+async function setupStudio(dataDirectory, { adapter: injectedAdapter, systemSourceBuilder }) {
   const projectDirectory = join(dataDirectory, 'projects');
   await mkdir(projectDirectory, { recursive: true });
   const repository = await initializeStore(dataDirectory);
@@ -75,16 +96,21 @@ export async function createStudio({
   const adapters = {
     defaultConnection,
     skill,
+    systemSourceBuilder,
     getProjectRoot(projectId) { return join(projectDirectory, projectId); },
     buildContext(project, _conversation, messages) {
+      let source;
+      if (project.currentSourceId) {
+        try { source = repository.getArtifactPath(project.id, project.currentSourceId)?.artifact; }
+        catch { /* 当前文件不在安全读取范围内，生成任务仍可按确认范围重新构建。 */ }
+      }
       return {
         instruction: '你是 AI Demo Studio 的需求讨论助手。依据项目描述和对话回答，不要声称已完成演示系统。',
         brief: `${project.title}\n\n${project.brief}`,
         requirements: [],
         messages: messages.slice(-50).map(({ role, text }) => ({ role: role === 'assistant' ? 'assistant' : 'user', text })),
-        fileIndex: repository.listArtifacts(project.id)
-          .filter((artifact) => artifact.state === 'available' && artifact.kind === 'source')
-          .map((artifact) => ({ artifactId: artifact.id, path: artifact.relativePath, bytes: artifact.bytes })),
+        fileIndex: source?.state === 'available' && source.kind === 'source'
+          ? [{ artifactId: source.id, path: source.relativePath, bytes: source.bytes }] : [],
         attachmentIndex: repository.listArtifacts(project.id, 'attachment')
           .filter((artifact) => artifact.state === 'available' && artifact.taskId && repository.getTask(artifact.taskId)?.state === 'succeeded')
           .map((artifact) => ({ artifactId: artifact.id, path: artifact.relativePath, bytes: artifact.bytes,
@@ -95,6 +121,9 @@ export async function createStudio({
     },
   };
 
+  recoverScriptPublications(repository);
+  recoverZipPublications(repository, 'source', (task) => task.kind === 'ai' && task.purpose === 'system',
+    '系统生成因工作台重启中断，请重新生成。');
   const app = createHttpApp({ repository, tasks, adapters, connectionProbes: { codex_app_server: adapter } });
   app.get('/', async (_request, reply) => {
     try {
@@ -123,17 +152,30 @@ export async function createStudio({
     tasks,
     listen(port) { return app.listen({ port, host: '127.0.0.1' }); },
     async close() {
-      await app.close();
-      await adapter.close?.();
-      repository.close();
+      try {
+        await app.close();
+      } finally {
+        try { await adapter.close?.(); }
+        finally { repository.close(); }
+      }
     },
   };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const studio = await createStudio();
+  let studio;
   try {
+    studio = await createStudio();
     const url = await studio.listen(Number(process.env.DEMO_STUDIO_PORT || 17860));
+    let closing;
+    const close = () => {
+      closing ??= studio.close().catch(() => {
+        console.error('工作台未能完整关闭。');
+        process.exitCode = 1;
+      });
+    };
+    process.on('SIGINT', close);
+    process.on('SIGTERM', close);
     console.log('AI Demo Studio 已启动：' + url);
     if (process.platform === 'win32' && process.env.DEMO_STUDIO_OPEN === '1') {
       const browser = spawn('explorer.exe', [url], { windowsHide: true, stdio: 'ignore', detached: true });
@@ -141,7 +183,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       browser.unref();
     }
   } catch (error) {
-    await studio.close();
+    await studio?.close();
     console.error(error.code === 'EADDRINUSE' ? '工作台端口已占用。若工作台已在运行，可直接打开原地址。' : error.message);
     process.exitCode = 1;
   }

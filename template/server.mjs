@@ -43,7 +43,7 @@ function readValues(fields, input) {
   return values;
 }
 
-export async function createDemoServer({ sourceDir = root, dataDir = join(root, '.runtime') } = {}) {
+export async function createDemoServer({ sourceDir = root, dataDir = join(root, '.runtime'), preview = false } = {}) {
   const spec = JSON.parse(await readFile(join(sourceDir, 'spec.json'), 'utf8'));
   const initial = await readFile(join(sourceDir, 'seed', 'records.json'), 'utf8');
   await mkdir(dataDir, { recursive: true });
@@ -57,7 +57,9 @@ export async function createDemoServer({ sourceDir = root, dataDir = join(root, 
     const host = '127.0.0.1:' + server.address().port;
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self' http://127.0.0.1:*");
+    // 旧版固定脚本依赖同源读写，预览只提供内置页面和脚本。
+    const sandbox = preview ? 'sandbox allow-scripts allow-forms allow-same-origin; ' : '';
+    res.setHeader('Content-Security-Policy', sandbox + "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self' http://127.0.0.1:*");
     if (req.headers.host !== host) return json(res, 403, { error: '只允许本机回环地址。' });
     const path = req.url?.split('?')[0];
     try {
@@ -67,7 +69,7 @@ export async function createDemoServer({ sourceDir = root, dataDir = join(root, 
         if (path === '/api/records') return json(res, 200, JSON.parse(await readFile(recordsFile, 'utf8')));
         if (Object.hasOwn(assets, path)) {
           const [file, type] = assets[path];
-          const content = await readFile(join(sourceDir, file));
+          const content = await readFile(join(preview ? root : sourceDir, file));
           res.writeHead(200, { 'Content-Type': type });
           return res.end(content);
         }

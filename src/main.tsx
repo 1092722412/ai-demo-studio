@@ -2,12 +2,15 @@ import { createRoot } from 'react-dom/client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import {
-  ArrowRight, Check, ChevronDown, CircleAlert, CircleCheck, Film, Layers3, LoaderCircle,
+  Check, ChevronDown, CircleAlert, CircleCheck, Film, Layers3, LoaderCircle,
   MessageSquare, Monitor, Plus, ScanLine, Send, Settings, Sparkles, Square, X,
 } from 'lucide-react';
 import { api, isTaskActive } from './api';
 import type { Attachment, Message, Project, Task, TaskEvent } from './api';
 import { SettingsPanel } from './SettingsPanel';
+import { RequirementsPanel } from './RequirementsPanel';
+import { HandoffPanel, handoffTaskName } from './HandoffPanel';
+import type { LocalPlanDraft } from './HandoffPanel';
 import { useTaskEvents } from './useTaskEvents';
 import './style.css';
 
@@ -136,6 +139,47 @@ function Conversation({
   </div>;
 }
 
+function SourcePreview({ projectId, sourceId }: { projectId: string; sourceId: string }) {
+  const [url, setUrl] = useState('');
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState('');
+
+  async function open() {
+    setOpening(true);
+    setError('');
+    try {
+      const preview = await api.openPreview(projectId);
+      setUrl(preview.previewUrl);
+    } catch (reason) {
+      setUrl('');
+      setError(errorMessage(reason));
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  return <>
+    <div className="panel-head preview-head">
+      <h2 id="preview">系统源码</h2>
+      <span className={url ? 'status ready' : 'status'}><i />{url ? '预览已启动' : '源码已登记'}</span>
+      <div className="preview-actions">
+        <button className="button secondary" type="button" disabled={opening} onClick={() => void open()}>
+          {opening ? '正在打开…' : '打开预览'}
+        </button>
+        <a className="button" href={
+          `/api/v1/artifacts/${encodeURIComponent(sourceId)}/content?projectId=${encodeURIComponent(projectId)}&download=1`
+        }>下载当前源码</a>
+      </div>
+    </div>
+    {error && <p className="notice preview-error" role="alert">{error}</p>}
+    {url ? <div className="browser">
+      <iframe title="当前系统预览" src={url} sandbox="allow-scripts allow-forms allow-same-origin" referrerPolicy="no-referrer" />
+    </div> : <div className="empty-stage">
+      <div className="stage-icon">{opening ? <LoaderCircle className="spin" size={36} /> : <Monitor size={38} />}</div>
+    </div>}
+  </>;
+}
+
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [project, setProject] = useState<Project | null>(null);
@@ -150,20 +194,33 @@ function App() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [planDrafts, setPlanDrafts] = useState<Record<string, LocalPlanDraft>>({});
+  const [proposalIds, setProposalIds] = useState<Record<string, string>>({});
   const selectedToken = useRef(0);
   const taskRef = useRef<Task | null>(null);
   useEffect(() => { taskRef.current = task; }, [task]);
 
   const refreshMessages = useCallback(async (projectId: string, conversationId?: string | null) => {
+    const selection = selectedToken.current;
     const result = await api.listMessages(projectId, conversationId);
+    if (selection !== selectedToken.current) return;
     setMessages(result.items);
     if (result.conversationId) {
       setProject((current) => current?.id === projectId ? { ...current, currentConversationId: result.conversationId! } : current);
     }
   }, []);
 
+  const refreshProject = useCallback(async (projectId: string) => {
+    const selection = selectedToken.current;
+    const updated = await api.getProject(projectId);
+    if (selection !== selectedToken.current) return;
+    setProject((current) => current?.id === projectId ? updated : current);
+    setProjects((items) => items.map((item) => item.id === projectId ? updated : item));
+  }, []);
+
   const onTaskEvent = useCallback((event: TaskEvent) => {
     const currentTask = taskRef.current;
+    if (currentTask?.taskId !== event.taskId) return;
     if (event.type === 'message.delta') {
       setActivity((current) => current.some((item) => item.label === '正在生成回复')
         ? current : [...current, { callId: null, label: '正在生成回复', status: 'running' }]);
@@ -203,20 +260,41 @@ function App() {
       const state: Task['state'] = event.type === 'task.succeeded' ? 'succeeded'
         : event.type === 'task.cancelled' ? 'cancelled'
           : event.type === 'task.interrupted' ? 'interrupted' : 'failed';
-      if (currentTask) setTask({ ...currentTask, state, phase: state, endedAt: event.at });
+      const selection = selectedToken.current;
+      const finished = { ...currentTask, state, endedAt: event.at,
+        result: state === 'succeeded' && currentTask.purpose !== 'plan' ? event.payload : currentTask.result,
+        error: state === 'succeeded' ? null : {
+          code: String(event.payload.code ?? state), message: String(event.payload.message ?? '任务未完成。'),
+          retryable: event.payload.retryable === true,
+          field: typeof event.payload.field === 'string' ? event.payload.field : undefined,
+          lastCompletedStepId: typeof event.payload.lastCompletedStepId === 'string' ? event.payload.lastCompletedStepId : undefined,
+          checks: Array.isArray(event.payload.checks) ? event.payload.checks : undefined,
+        },
+      };
+      taskRef.current = finished;
+      setTask(finished);
+      const showError = (reason: unknown) => {
+        if (selection === selectedToken.current && taskRef.current?.taskId === event.taskId) setError(errorMessage(reason));
+      };
+      if ((state === 'succeeded' && currentTask.kind === 'script') || currentTask.kind === 'record') {
+        void refreshProject(currentTask.projectId).catch(showError);
+      }
       setActivity((current) => current.map((item) => item.status === 'running' ? { ...item, status: state === 'failed' || state === 'interrupted' ? 'failed' : 'done' } : item));
       if (state === 'succeeded' && currentTask?.conversationId) {
-        void refreshMessages(currentTask.projectId, currentTask.conversationId).catch((reason) => setError(errorMessage(reason)));
+        void refreshMessages(currentTask.projectId, currentTask.conversationId).catch(showError);
+        if (currentTask.purpose === 'system') {
+          void refreshProject(currentTask.projectId).catch(showError);
+        }
       } else if (state === 'failed' || state === 'interrupted') {
         const payload = event.payload as { message?: unknown };
         if (typeof payload.message === 'string') setError(payload.message);
       }
       setWaitingInput(null);
-      if (state === 'cancelled') setError('本轮任务已停止。');
+      if (state === 'cancelled' && currentTask.kind !== 'record') setError('本轮任务已停止。');
     }
-  }, [refreshMessages]);
+  }, [refreshMessages, refreshProject]);
 
-  useTaskEvents(task?.taskId ?? null, onTaskEvent);
+  useTaskEvents(task && (!handoffTaskName(task) || isTaskActive(task.state)) ? task.taskId : null, onTaskEvent);
 
   useEffect(() => {
     let alive = true;
@@ -230,7 +308,16 @@ function App() {
   }, []);
 
   async function selectProject(projectId: string) {
+    if (project?.id === projectId) {
+      setMenuOpen(false);
+      return;
+    }
     const token = ++selectedToken.current;
+    setProject(null);
+    setView('build');
+    setMenuOpen(false);
+    setSubmitting(true);
+    taskRef.current = null;
     setError('');
     setTask(null);
     setWaitingInput(null);
@@ -246,18 +333,26 @@ function App() {
       await refreshMessages(selected.id, selected.currentConversationId);
       if (selected.activeTasks[0]) {
         const activeTask = await api.getTask(selected.activeTasks[0]);
-        if (token === selectedToken.current) setTask(activeTask);
+        if (token === selectedToken.current && activeTask.projectId === projectId) {
+          if (activeTask.purpose === 'plan') {
+            setProposalIds((current) => ({ ...current, [projectId]: activeTask.taskId }));
+          }
+          taskRef.current = activeTask;
+          setTask(activeTask);
+          if (activeTask.kind === 'record') setView('handoff');
+        }
       }
     } catch (reason) {
       if (token === selectedToken.current) setError(errorMessage(reason));
     } finally {
-      setMenuOpen(false);
-      setView('build');
+      if (token === selectedToken.current) setSubmitting(false);
     }
   }
 
   function newProject() {
     selectedToken.current++;
+    taskRef.current = null;
+    setSubmitting(false);
     setProject(null);
     setMessages([]);
     setTask(null);
@@ -271,7 +366,9 @@ function App() {
     updateAddress(null);
   }
 
-  async function submitMessage(text: string, currentProject: Project, conversationId?: string | null, purpose: 'discuss' | 'requirements' = 'discuss') {
+  async function submitMessage(text: string, currentProject: Project, conversationId?: string | null,
+    purpose: 'discuss' | 'requirements' | 'system' = 'discuss') {
+    const selection = selectedToken.current;
     const requestId = crypto.randomUUID();
     setSubmitting(true);
     setError('');
@@ -284,51 +381,93 @@ function App() {
         text,
       });
       const updatedProject = { ...currentProject, currentConversationId: accepted.conversationId };
+      if (selection !== selectedToken.current) return;
       setProject(updatedProject);
       setProjects((items) => [updatedProject, ...items.filter((item) => item.id !== updatedProject.id)]);
       await refreshMessages(currentProject.id, accepted.conversationId);
       const nextTask = await api.getTask(accepted.taskId);
+      if (selection !== selectedToken.current) return;
       taskRef.current = nextTask;
       setTask(nextTask);
       setActivity([{ callId: null, label: '已发送给 Codex', status: 'running' }]);
     } catch (reason) {
+      if (selection !== selectedToken.current) return;
       setError(errorMessage(reason));
       setActivity((items) => items.map((item) => item.status === 'running' ? { ...item, status: 'failed' } : item));
     } finally {
-      setSubmitting(false);
+      if (selection === selectedToken.current) setSubmitting(false);
     }
   }
 
+  async function startHandoff(start: () => Promise<{ taskId: string }>) {
+    const selection = selectedToken.current;
+    const projectId = project?.id;
+    setSubmitting(true);
+    setError('');
+    setWaitingInput(null);
+    setActivity([]);
+    try {
+      const { taskId } = await start();
+      if (selection !== selectedToken.current) return;
+      const next = await api.getTask(taskId);
+      if (selection !== selectedToken.current || next.projectId !== projectId) return;
+      taskRef.current = next;
+      setTask(next);
+      if (next.conversationId) {
+        void refreshMessages(next.projectId, next.conversationId).catch((reason) => {
+          if (selection === selectedToken.current && taskRef.current?.taskId === taskId) setError(errorMessage(reason));
+        });
+      }
+      return taskId;
+    } finally {
+      if (selection === selectedToken.current) setSubmitting(false);
+    }
+  }
+
+  function updatePlanDraft(projectId: string, update: (previous: LocalPlanDraft | null) => LocalPlanDraft | null) {
+    setPlanDrafts((current) => {
+      const next = { ...current };
+      const draft = update(current[projectId] ?? null);
+      if (draft) next[projectId] = draft;
+      else delete next[projectId];
+      return next;
+    });
+  }
+
   async function uploadAttachment(file: File, currentProject: Project) {
+    const selection = selectedToken.current;
     setSubmitting(true);
     setError('');
     try {
       const accepted = await api.uploadAttachment(currentProject.id, file);
       const next = await api.getTask(accepted.taskId);
+      if (selection !== selectedToken.current) return;
       setTask(next);
       taskRef.current = next;
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (selection === selectedToken.current) setError(errorMessage(reason));
     } finally {
-      setSubmitting(false);
+      if (selection === selectedToken.current) setSubmitting(false);
     }
   }
 
   async function startDiscussion(event: FormEvent) {
     event.preventDefault();
     if (submitting || isTaskActive(task?.state) || !brief.title.trim() || !brief.requirement.trim()) return;
+    const selection = selectedToken.current;
     setSubmitting(true);
     setError('');
     try {
       const created = await api.createProject({ title: brief.title.trim(), brief: brief.requirement.trim() });
+      if (selection !== selectedToken.current) return;
       setProject(created);
       setProjects((items) => [created, ...items.filter((item) => item.id !== created.id)]);
       updateAddress(created.id);
       await submitMessage(brief.requirement.trim(), created);
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (selection === selectedToken.current) setError(errorMessage(reason));
     } finally {
-      setSubmitting(false);
+      if (selection === selectedToken.current) setSubmitting(false);
     }
   }
 
@@ -342,51 +481,59 @@ function App() {
 
   async function cancelTask() {
     if (!task || task.state === 'cancelling') return;
+    const selection = selectedToken.current;
     try {
       const updated = await api.cancelTask(task.taskId);
+      if (selection !== selectedToken.current || taskRef.current?.taskId !== updated.taskId
+        || !isTaskActive(taskRef.current.state)) return;
       setTask(updated);
       taskRef.current = updated;
       if (updated.state === 'cancelling') setError('正在停止当前任务…');
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (selection === selectedToken.current) setError(errorMessage(reason));
     }
   }
 
   async function respondInput(value: { requestId: string; choice?: string; text?: string; response?: Record<string, unknown> }) {
     if (!task) return;
+    const selection = selectedToken.current;
     setSubmitting(true);
     try {
       const updated = await api.respondInput(task.taskId, value);
+      if (selection !== selectedToken.current || taskRef.current?.taskId !== updated.taskId
+        || !isTaskActive(taskRef.current.state)) return;
       setTask(updated);
       taskRef.current = updated;
       setWaitingInput(null);
       setError('');
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (selection === selectedToken.current) setError(errorMessage(reason));
     } finally {
-      setSubmitting(false);
+      if (selection === selectedToken.current) setSubmitting(false);
     }
   }
 
   async function saveBrief(event: FormEvent) {
     event.preventDefault();
     if (!project || isTaskActive(task?.state)) return;
+    const selection = selectedToken.current;
     setSubmitting(true);
     try {
       const updated = await api.patchProject(project.id, { title: brief.title, brief: brief.requirement });
+      if (selection !== selectedToken.current) return;
       setProject(updated);
       setProjects((items) => [updated, ...items.filter((item) => item.id !== updated.id)]);
       setError('需求已保存。');
     } catch (reason) {
-      setError(errorMessage(reason));
+      if (selection === selectedToken.current) setError(errorMessage(reason));
     } finally {
-      setSubmitting(false);
+      if (selection === selectedToken.current) setSubmitting(false);
     }
   }
 
   const active = isTaskActive(task?.state);
   const changed = Boolean(project && (brief.title !== project.title || brief.requirement !== project.brief));
-  const activeSteps = project ? active ? 1 : 1 : 0;
+  const activeSteps = !project ? 0 : project.stage !== 'requirements' || task?.purpose === 'system' && active ? 2 : 1;
 
   return <div className="studio">
     <aside className="sidebar">
@@ -437,6 +584,11 @@ function App() {
               <Attachments key={project.id} projectId={project.id} task={task} busy={submitting || active}
                 onUpload={(file) => void uploadAttachment(file, project)}
                 onOrganize={() => void submitMessage('请读取本项目已提取的材料，整理需要演示的条目、预期结果及原文出处，供人工确认。', project, project.currentConversationId, 'requirements')} />
+              <RequirementsPanel key={JSON.stringify([project.id, project.brief])} project={project}
+                proposalTask={task?.purpose === 'requirements' && task.state === 'succeeded' ? task.taskId : undefined}
+                busy={submitting || active || changed}
+                onSaved={() => void refreshProject(project.id).catch((reason) => setError(errorMessage(reason)))}
+                onGenerate={() => void submitMessage('请按已确认的制作范围生成系统。', project, project.currentConversationId, 'system')} />
               <details className="brief-details">
                 <summary>演示需求</summary>
                 <form id="brief" onSubmit={saveBrief}>
@@ -465,15 +617,19 @@ function App() {
             </>}
           </section>
           <section className="panel stage" aria-labelledby="preview">
-            <div className="panel-head preview-head">
-              <h2 id="preview">系统预览</h2>
-              {project && <span className="status"><i />{project.currentSourceId ? '源码已登记' : '尚未生成'}</span>}
-            </div>
-            <div className="empty-stage">
-              <div className="stage-icon">{active ? <LoaderCircle className="spin" size={36} /> : <Monitor size={38} />}</div>
-              <strong>{active ? task?.state === 'cancelling' ? '正在停止任务' : task?.kind === 'build' ? '正在提取附件' : '正在处理需求' : '系统生成待接入'}</strong>
-              <span>{active ? '调用过程会在左侧更新。' : '当前可以通过 Codex 讨论和整理需求；确认范围与系统生成将在后续步骤接入。'}</span>
-            </div>
+            {project?.currentSourceId ? <SourcePreview key={project.id + '/' + project.currentSourceId}
+              projectId={project.id} sourceId={project.currentSourceId} /> : <>
+              <div className="panel-head preview-head">
+                <h2 id="preview">系统源码</h2>
+                {project && <span className="status"><i />尚未生成</span>}
+              </div>
+              <div className="empty-stage">
+                <div className="stage-icon">{active ? <LoaderCircle className="spin" size={36} /> : <Monitor size={38} />}</div>
+                {active ? <strong>{task?.state === 'cancelling' ? '正在停止任务' : task?.purpose === 'system' ? '正在生成系统'
+                  : task?.kind === 'build' ? '正在提取附件' : '正在处理需求'}</strong>
+                  : <span>确认制作范围后可生成并预览系统。</span>}
+              </div>
+            </>}
           </section>
         </div>
         <footer className="dock">
@@ -487,14 +643,22 @@ function App() {
         setProject(updated);
         setProjects((items) => items.map((item) => item.id === updated.id ? updated : item));
         void refreshMessages(updated.id, updated.currentConversationId).catch((reason) => setError(errorMessage(reason)));
-      }} /> : <section className="panel handoff">
-        <div className="panel-head"><h2>录制准备</h2></div>
-        <div className="handoff-body">
-          <p>项目 <strong>{project?.title || '尚未选择'}</strong></p>
-          <p>录制、脚本和审片接口将在后续实施项接入。当前不会启动演示或录屏。</p>
-          <button className="text-button" onClick={() => setView('build')}>返回需求讨论 <ArrowRight size={16} /></button>
-        </div>
+      }} /> : !project && <section className="panel">
+        <p className="handoff-body">请先在需求与预览中创建或选择项目。</p>
       </section>}
+      {project && <HandoffPanel key={project.id} project={project} hidden={view !== 'handoff'}
+        busy={submitting || active} task={handoffTaskName(task) ? task : null}
+        local={planDrafts[project.id] ?? null} updateLocal={updatePlanDraft}
+        proposalId={proposalIds[project.id]} rememberProposal={(projectId, taskId) =>
+          setProposalIds((current) => ({ ...current, [projectId]: taskId }))}
+        taskProgress={activity.at(-1)?.label} taskError={error}
+        startTask={startHandoff} openSettings={() => setView('settings')}
+        taskControls={<>
+          {waitingInput && task?.purpose === 'plan' && <button type="button" className="text-button"
+            onClick={() => setView('build')}>前往需求讨论处理人工输入</button>}
+          {active && <button type="button" className="text-button" onClick={() => void cancelTask()}
+            disabled={task?.state === 'cancelling'}>停止任务</button>}
+        </>} />}
     </main>
   </div>;
 }

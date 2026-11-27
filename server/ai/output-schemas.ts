@@ -1,5 +1,6 @@
-import { AiTaskError, type RequirementsDelivery } from './contracts.js';
+import { AiTaskError, type PlanDelivery, type RequirementsDelivery } from './contracts.js';
 import type { SourceRef } from '../attachments.js';
+import { planObject } from '../plans.js';
 
 const sourceRefSchema = {
   type: 'object', additionalProperties: false, required: ['artifactId', 'locator', 'quote'],
@@ -16,6 +17,32 @@ export const requirementsOutputSchema = {
     } },
   },
 };
+
+export const planOutputSchema = {
+  type: 'object', additionalProperties: false, required: ['reply', 'draftJson'],
+  properties: { reply: { type: 'string' }, draftJson: { type: ['string', 'null'] } },
+};
+
+export function mapPlanOutput(value: unknown) {
+  const output = planObject(value);
+  if (output && Object.keys(output).length === 2 && typeof output.reply === 'string'
+      && /[\u3400-\u9fff]/.test(output.reply)) {
+    const reply = output.reply.trim();
+    if (output.draftJson === null) return { reply, delivery: null };
+    if (typeof output.draftJson === 'string') {
+      try {
+        const draft = planObject(JSON.parse(output.draftJson));
+        if (draft) {
+          const delivery: PlanDelivery = { kind: 'plan', draft };
+          return { reply, delivery };
+        }
+      } catch {
+        // 无法解析时统一返回结构错误。
+      }
+    }
+  }
+  throw new AiTaskError('OUTPUT_INVALID', 'Codex 返回的方案须为 JSON 草稿对象或 null。');
+}
 
 export function mapRequirementsOutput(value: unknown, sources: readonly SourceRef[]) {
   const output = exact(value, ['reply', 'items']);

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://ai-demo-studio.invalid/schema/execution-handoff.schema.json",
   "title": "脚本、采集与媒体交接设计稿",
-  "description": "设计数据，尚未接入运行代码。字段引用由服务解析；时间关系和资源可用性另作语义校验。",
+  "description": "脚本清单和准备数据已接入工作台。采集与媒体交接用于描述目标格式。时间关系和资源可用性由各阶段服务校验。",
   "oneOf": [
     {
       "$ref": "#/$defs/script"

@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
-import { readFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { createProjectsService, type HttpServiceError, type ProjectAdapterContext } from './services/projects.js';
 import { readTaskEvents } from './events.js';
 import type { StudioRepository } from './store/repository.js';
@@ -9,6 +9,12 @@ import { createSettingsService } from './settings.js';
 import { createConnectionsService } from './connections.js';
 import { createArtifactJobs } from './services/artifact-jobs.js';
 import { maxAttachmentBytes } from './attachments.js';
+import { createPlanService } from './plans.js';
+import { createScriptService } from './scripts.js';
+import { videoRange } from './artifacts.js';
+import { createRequirementsService } from './requirements.js';
+import { createPreviewService } from './preview.js';
+import { createRecordingService, type RecordingOptions } from './recording.js';
 
 const jsonLimit = 1_048_576;
 const localHostPattern = /^127\.0\.0\.1:\d{1,5}$/;
@@ -25,6 +31,7 @@ export function createHttpApp({
   connectionProbes,
   credentialStorage,
   speechRenderer,
+  recordingOptions,
 }: {
   repository: StudioRepository;
   tasks: TaskService;
@@ -32,11 +39,18 @@ export function createHttpApp({
   connectionProbes?: Parameters<typeof createConnectionsService>[1];
   credentialStorage?: Parameters<typeof createConnectionsService>[2];
   speechRenderer?: Parameters<typeof createArtifactJobs>[1];
+  recordingOptions?: RecordingOptions;
 }): StudioHttpApp {
-  const projects = createProjectsService(repository, tasks, adapters);
+  const previews = createPreviewService(repository);
+  const projects = createProjectsService(repository, tasks, adapters, previews.retire);
   const settings = createSettingsService(repository);
   const connections = createConnectionsService(repository, connectionProbes, credentialStorage);
   const artifactJobs = createArtifactJobs(repository, speechRenderer);
+  const plans = createPlanService(repository);
+  const requirements = createRequirementsService(repository);
+  const scripts = createScriptService(repository);
+  const recordings = createRecordingService(repository, previews.recordingTarget, recordingOptions);
+  const shutdown = new AbortController();
   const app = Fastify({
     bodyLimit: jsonLimit,
     exposeHeadRoutes: false,
@@ -44,6 +58,12 @@ export function createHttpApp({
   });
   app.register(multipart, { limits: { parts: 2, files: 1, fields: 0, fileSize: maxAttachmentBytes + 1 } });
   app.addHook('onClose', () => artifactJobs.close());
+  app.addHook('onClose', () => scripts.close());
+  app.addHook('preClose', async () => {
+    shutdown.abort();
+    await recordings.close();
+    await previews.close();
+  });
 
   app.decorate('subscribe', (taskId: string, afterSeq: number, signal: AbortSignal, pollMs?: number) =>
     readTaskEvents(repository, taskId, afterSeq, signal, pollMs));
@@ -57,7 +77,8 @@ export function createHttpApp({
       if (!isAllowedWriteOrigin(headers)) return sendError(reply, 403, 'VALIDATION_FAILED', '请求来源无效。');
       const upload = request.routeOptions.url === '/api/v1/projects/:projectId/attachments';
       const bodyless = request.routeOptions.url === '/api/v1/connections/:id/credential'
-        || request.routeOptions.url === '/api/v1/connections/:id/probe';
+        || request.routeOptions.url === '/api/v1/connections/:id/probe'
+        || request.routeOptions.url === '/api/v1/projects/:projectId/preview';
       if (upload && !/^multipart\/form-data(?:\s*;|$)/i.test(headers['content-type'] ?? '')) {
         return sendError(reply, 415, 'VALIDATION_FAILED', '附件上传必须使用 multipart/form-data。');
       }
@@ -70,7 +91,9 @@ export function createHttpApp({
   app.addHook('onSend', async (_request, reply, payload) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Cache-Control', 'no-store');
-    reply.header('Content-Security-Policy', "default-src 'self'; frame-src http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+    reply.header('Content-Security-Policy', _request.routeOptions.url === '/api/v1/artifacts/:artifactId/content'
+      ? "sandbox; default-src 'none'; frame-ancestors 'none'"
+      : "default-src 'self'; frame-src http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     return payload;
   });
 
@@ -103,18 +126,18 @@ export function createHttpApp({
   });
   app.post<{ Params: { id: string } }>('/api/v1/connections/:id/probe', async (request, reply) =>
     sendData(reply, 200, await connections.probe(pathId(request.params.id))));
-  app.get('/api/v1/settings', async (_request, reply) => sendSettings(reply, settings.read('global')));
-  app.put<{ Body: unknown }>('/api/v1/settings', async (request, reply) => sendSettings(reply,
+  app.get('/api/v1/settings', async (_request, reply) => sendWithToken(reply, settings.read('global')));
+  app.put<{ Body: unknown }>('/api/v1/settings', async (request, reply) => sendWithToken(reply,
     settings.save('global', objectBody(request.body).values, request.headers['if-match'] ?? null)));
   app.get<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/settings', async (request, reply) => {
     const projectId = pathId(request.params.projectId);
     if (!repository.getProject(projectId)) throw httpError('VALIDATION_FAILED', 404, '未找到项目。');
-    return sendSettings(reply, settings.read(`project:${projectId}`));
+    return sendWithToken(reply, settings.read(`project:${projectId}`));
   });
   app.put<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId/settings', async (request, reply) => {
     const projectId = pathId(request.params.projectId);
     if (!repository.getProject(projectId)) throw httpError('VALIDATION_FAILED', 404, '未找到项目。');
-    return sendSettings(reply, settings.save(`project:${projectId}`, objectBody(request.body).values, request.headers['if-match'] ?? null));
+    return sendWithToken(reply, settings.save(`project:${projectId}`, objectBody(request.body).values, request.headers['if-match'] ?? null));
   });
   app.post<{ Body: unknown }>('/api/v1/projects', async (request, reply) =>
     sendData(reply, 201, projects.createProject(request.body)));
@@ -123,6 +146,19 @@ export function createHttpApp({
     sendData(reply, 200, projects.getProject(pathId(request.params.projectId))));
   app.patch<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId', async (request, reply) =>
     sendData(reply, 200, projects.updateProject(pathId(request.params.projectId), request.body)));
+
+  app.get<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/requirements', async (request, reply) =>
+    sendWithToken(reply, requirements.read(pathId(request.params.projectId))));
+  app.put<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId/requirements', async (request, reply) =>
+    sendWithToken(reply, requirements.save(pathId(request.params.projectId), request.body, request.headers['if-match'] ?? null)));
+  app.get<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/plan', async (request, reply) =>
+    sendWithToken(reply, plans.read(pathId(request.params.projectId))));
+  app.put<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId/plan', async (request, reply) =>
+    sendWithToken(reply, plans.save(pathId(request.params.projectId), objectBody(request.body).draft, request.headers['if-match'] ?? null)));
+  app.post<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId/scripts', async (request, reply) =>
+    sendData(reply, 202, await scripts.start(pathId(request.params.projectId), request.body)));
+  app.post<{ Params: { projectId: string }; Body: unknown }>('/api/v1/projects/:projectId/recordings', async (request, reply) =>
+    sendData(reply, 202, await recordings.startRecording(pathId(request.params.projectId), request.body)));
 
   app.get<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/messages', async (request, reply) =>
     sendData(reply, 200, projects.listMessages(pathId(request.params.projectId), requestSearchParams(request))));
@@ -147,6 +183,8 @@ export function createHttpApp({
   });
   app.post<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/speech-preview', async (request, reply) =>
     sendData(reply, 202, artifactJobs.preview(pathId(request.params.projectId), objectBody(request.body))));
+  app.post<{ Params: { projectId: string } }>('/api/v1/projects/:projectId/preview', async (request, reply) =>
+    sendData(reply, 200, await previews.open(pathId(request.params.projectId))));
 
   app.get<{ Params: { taskId: string } }>('/api/v1/tasks/:taskId', async (request, reply) =>
     sendData(reply, 200, projects.getTask(pathId(request.params.taskId))));
@@ -155,7 +193,7 @@ export function createHttpApp({
   app.post<{ Params: { taskId: string } }>('/api/v1/tasks/:taskId/cancel', async (request, reply) => {
     const taskId = pathId(request.params.taskId);
     const task = repository.getTask(taskId);
-    if (task && artifactJobs.cancel(task)) return sendData(reply, 202, projects.getTask(taskId));
+    if (task && (artifactJobs.cancel(task) || scripts.cancel(task) || recordings.cancel(task))) return sendData(reply, 202, projects.getTask(taskId));
     const cancelled = await projects.cancelTask(taskId);
     return sendData(reply, cancelled.statusCode, cancelled.data);
   });
@@ -171,18 +209,37 @@ export function createHttpApp({
     if (cursor > repository.getLastEventSeq(taskId)) throw httpError('VALIDATION_FAILED', 400, '事件序号超出当前范围。');
 
     reply.hijack();
-    await streamEvents(repository, taskId, cursor, request.raw, reply.raw);
+    await streamEvents(repository, taskId, cursor, request.raw, reply.raw, shutdown.signal);
   });
 
   app.get<{ Params: { artifactId: string } }>('/api/v1/artifacts/:artifactId/content', async (request, reply) => {
     const search = requestSearchParams(request);
     const projectId = search.get('projectId');
     if (!projectId) throw httpError('VALIDATION_FAILED', 422, '读取文件时必须提供 projectId。', 'projectId');
-    const { artifact, path } = projects.getArtifact(pathId(projectId), pathId(request.params.artifactId));
-    const bytes = await readFile(path);
-    reply.type(artifact.mime).header('Content-Length', String(bytes.byteLength));
-    if (search.has('download')) reply.header('Content-Disposition', `attachment; filename="${artifact.id}"`);
-    return reply.send(bytes);
+    const download = search.get('download') === '1';
+    const { artifact, path } = projects.getArtifact(pathId(projectId), pathId(request.params.artifactId), download);
+    const handle = await open(path, 'r').catch(() => { throw httpError('VALIDATION_FAILED', 404, '此文件当前不可读取。'); });
+    let stream;
+    try {
+      const { size } = await handle.stat();
+      const video = artifact.mime.startsWith('video/');
+      const range = video && request.headers.range ? videoRange(request.headers.range, size) : undefined;
+      if (video) reply.header('Accept-Ranges', 'bytes');
+      if (range === null) {
+        reply.header('Content-Range', `bytes */${size}`);
+        return sendError(reply, 416, 'VALIDATION_FAILED', '请求的视频范围无效。');
+      }
+      if (range) reply.code(206).header('Content-Range', `bytes ${range.start}-${range.end}/${size}`);
+      reply.type(artifact.mime).header('Content-Length', String(range ? range.end - range.start + 1 : size));
+      if (download) {
+        const extension = artifact.relativePath.match(/(?:\.[A-Za-z0-9]{1,10})(?:\.partial)?$/)?.[0] ?? '';
+        reply.header('Content-Disposition', `attachment; filename="${artifact.id}${extension}"`);
+      }
+      stream = handle.createReadStream(range);
+      return reply.send(stream);
+    } finally {
+      if (!stream) await handle.close();
+    }
   });
 
   return app as unknown as StudioHttpApp;
@@ -194,8 +251,10 @@ async function streamEvents(
   cursor: number,
   req: FastifyRequest['raw'],
   res: FastifyReply['raw'],
+  shutdown: AbortSignal,
 ): Promise<void> {
   const controller = new AbortController();
+  const signal = AbortSignal.any([controller.signal, shutdown]);
   const abort = () => controller.abort();
   res.on('close', abort);
   req.socket?.on('close', abort);
@@ -210,8 +269,8 @@ async function streamEvents(
   const heartbeat = setInterval(() => { if (!res.destroyed) res.write(': keepalive\n\n'); }, 15_000);
   (heartbeat as unknown as { unref?: () => void }).unref?.();
   try {
-    for await (const event of readTaskEvents(repository, taskId, cursor, controller.signal)) {
-      if (res.destroyed || controller.signal.aborted) break;
+    for await (const event of readTaskEvents(repository, taskId, cursor, signal)) {
+      if (res.destroyed || signal.aborted) break;
       res.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
       if (terminalTypes.has(event.type)) break;
     }
@@ -231,7 +290,7 @@ function sendData(reply: FastifyReply, status: number, data: unknown) {
   return reply.code(status).send({ data });
 }
 
-function sendSettings(reply: FastifyReply, data: ReturnType<ReturnType<typeof createSettingsService>['read']>) {
+function sendWithToken(reply: FastifyReply, data: { editToken: string }) {
   reply.header('ETag', `"${data.editToken}"`);
   return sendData(reply, 200, data);
 }

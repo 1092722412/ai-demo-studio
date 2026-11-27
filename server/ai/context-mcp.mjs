@@ -5,6 +5,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { extractAttachment } from '../../dist-server/attachments.js';
+import { isSourcePath, openSourceArchive, sourceArchiveLimit } from '../../dist-server/artifacts.js';
 
 const contextFile = process.argv[2];
 const projectRoot = process.argv[3];
@@ -38,10 +39,10 @@ server.setRequestHandler(ListToolsRequestSchema, () => ({
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   }, {
     name: 'get_current_source',
-    description: '按 artifactId 读取当前项目明确列入索引的源码或样例文件。只读。',
+    description: '按 artifactId 读取当前源码。ZIP 可先省略 file 列出文件，再传 file 读取包内文本。只读。',
     inputSchema: {
       type: 'object',
-      properties: { artifactId: { type: 'string' } },
+      properties: { artifactId: { type: 'string' }, file: { type: 'string' } },
       required: ['artifactId'],
       additionalProperties: false,
     },
@@ -53,6 +54,8 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
   try {
     const context = await getContext();
     if (params.name === 'get_demo_brief') {
+      const planSchema = context.purpose === 'plan'
+        ? JSON.parse(await readFile(new URL('../../docs/examples/demo-contract.schema.json', import.meta.url), 'utf8')) : undefined;
       return { content: [{ type: 'text', text: JSON.stringify({
         taskId: context.taskId,
         projectId: context.projectId,
@@ -63,6 +66,8 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
         brief: context.brief,
         requirements: context.requirements,
         messages: context.messages,
+        currentPlan: context.currentPlan,
+        planSchema,
         availableSourceFiles: context.fileIndex.map(({ artifactId, path, bytes }) => ({ artifactId, path, bytes })),
         attachments: (context.attachmentIndex ?? []).map(({ artifactId, name, bytes }) => ({ artifactId, name, bytes })),
       }) }] };
@@ -103,7 +108,7 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
       }) }] };
     }
     if (params.name === 'get_current_source') {
-      const artifactId = params.arguments?.artifactId;
+      const { artifactId, file } = params.arguments ?? {};
       const entry = context.fileIndex.find((file) => file.artifactId === artifactId);
       if (!entry) return { isError: true, content: [{ type: 'text', text: '该文件不在当前项目的读取索引中。' }] };
       const requested = String(entry.path || '');
@@ -113,18 +118,30 @@ server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
       const root = await realpath(projectRoot);
       const candidate = resolve(root, requested);
       const relativePath = relative(root, candidate);
-      if (!relativePath || relativePath === '..' || relativePath.startsWith('..' + sep)) {
+      if (!relativePath || isAbsolute(relativePath) || relativePath === '..' || relativePath.startsWith('..' + sep)) {
         return { isError: true, content: [{ type: 'text', text: '源码路径超出当前项目范围。' }] };
       }
       const actual = await realpath(candidate);
       const actualRelative = relative(root, actual);
-      if (actualRelative === '..' || actualRelative.startsWith('..' + sep)) {
+      if (!actualRelative || isAbsolute(actualRelative) || actualRelative === '..' || actualRelative.startsWith('..' + sep)) {
         return { isError: true, content: [{ type: 'text', text: '源码文件指向项目外路径。' }] };
       }
       const info = await stat(actual);
-      if (!info.isFile() || info.size > sourceLimit ||
+      const archived = requested.toLowerCase().endsWith('.zip');
+      if (!info.isFile() || info.size > (archived ? sourceArchiveLimit : sourceLimit) ||
           (Number.isFinite(entry.bytes) && entry.bytes >= 0 && info.size !== entry.bytes)) {
         return { isError: true, content: [{ type: 'text', text: '源码文件大小或状态与当前索引不一致。' }] };
+      }
+      if (archived) {
+        if (file !== undefined && (typeof file !== 'string' || !isSourcePath(file)
+            || !/\.(?:js|mjs|cjs|jsx|ts|tsx|html|css|json|md|txt|py|csv|sql|vue|svelte)$/i.test(file))) {
+          return { isError: true, content: [{ type: 'text', text: '请选择源码包内的文本文件。' }] };
+        }
+        const { names, files } = openSourceArchive(await readFile(actual), file ? new Map([[file, 500_000]]) : undefined);
+        if (!file) return { content: [{ type: 'text', text: JSON.stringify({ artifactId, files: [...names].slice(0, 200) }) }] };
+        if (!Object.hasOwn(files, file)) return { isError: true, content: [{ type: 'text', text: '该文本不在源码包中。' }] };
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(files[file]);
+        return { content: [{ type: 'text', text }] };
       }
       const text = await readFile(actual, 'utf8');
       return { content: [{ type: 'text', text }] };

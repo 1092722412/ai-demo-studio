@@ -16,6 +16,15 @@ export type ProjectRecord = {
   updatedAt: string;
 };
 
+export type RequirementRecord = {
+  id: string;
+  text: string;
+  outcome: string;
+  sourceRef: { artifactId: string; locator: string; quote: string } | null;
+  confirmed: boolean;
+  sortOrder: number;
+};
+
 export type ConnectionRecord = {
   id: string;
   name: string;
@@ -156,12 +165,18 @@ export type StudioRepository = {
   getArtifactPath(projectId: string, artifactId: string): { artifact: ArtifactRecord; path: string } | null;
   getNewArtifactPath(projectId: string, relativePath: string): string;
   getPlan(projectId: string): PlanRecord | null;
+  listRequirements(projectId: string): RequirementRecord[];
+  replaceRequirements(projectId: string, items: RequirementRecord[]): void;
+  listConfirmedRequirementIds(projectId: string): string[];
+  clearRequirementConfirmations(projectId: string): void;
+  markPlanReady(projectId: string, editToken: string, sourceArtifactId: string): boolean;
   getSettings(scope: string): SettingsRecord | null;
   ensureSettings(scope: string): SettingsRecord;
   saveProject(project: ProjectRecord): ProjectRecord;
   saveTask(task: TaskRecord): TaskRecord;
   appendEvent(event: Omit<EventRecord, 'seq'>): EventRecord;
   registerArtifact(artifact: ArtifactRecord): ArtifactRecord;
+  finalizeArtifact(artifactId: string, state: 'available' | 'partial' | 'missing', bytes: number, relativePath?: string): ArtifactRecord;
   compareAndSavePlan(plan: PlanSave): { saved: boolean; editToken: string | null };
   compareAndSaveSettings(settings: SettingsSave): { saved: boolean; editToken: string | null };
   close(): void;
@@ -398,6 +413,50 @@ class SqliteStudioRepository implements StudioRepository {
     return { artifact, path: fileReal };
   }
 
+  listRequirements(projectId: string): RequirementRecord[] {
+    this.assertOpen();
+    const rows = this.database.prepare('SELECT * FROM requirement WHERE project_id = ? ORDER BY sort_order, id')
+      .all(projectId) as DbRow[];
+    return rows.map((row) => ({ id: String(row.id), text: String(row.text), outcome: String(row.outcome),
+      sourceRef: parseNullableJson(row.source_ref_json) as RequirementRecord['sourceRef'],
+      confirmed: row.confirmed === 1, sortOrder: Number(row.sort_order) }));
+  }
+
+  // 调用方在更新项目阶段和方案的同一事务内替换条款。
+  replaceRequirements(projectId: string, items: RequirementRecord[]): void {
+    this.assertOpen();
+    this.database.prepare('DELETE FROM requirement WHERE project_id = ?').run(projectId);
+    const insert = this.database.prepare(`
+      INSERT INTO requirement (id, project_id, text, outcome, source_ref_json, confirmed, sort_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const item of items) {
+      insert.run(item.id, projectId, item.text, item.outcome, item.sourceRef ? JSON.stringify(item.sourceRef) : null,
+        Number(item.confirmed), item.sortOrder);
+    }
+  }
+
+  listConfirmedRequirementIds(projectId: string): string[] {
+    this.assertOpen();
+    const rows = this.database.prepare('SELECT id FROM requirement WHERE project_id = ? AND confirmed = 1')
+      .all(projectId) as DbRow[];
+    return rows.map((row) => String(row.id));
+  }
+
+  clearRequirementConfirmations(projectId: string): void {
+    this.assertOpen();
+    this.database.prepare('UPDATE requirement SET confirmed = 0 WHERE project_id = ? AND confirmed = 1').run(projectId);
+  }
+
+  markPlanReady(projectId: string, editToken: string, sourceArtifactId: string): boolean {
+    this.assertOpen();
+    const result = this.database.prepare(`
+      UPDATE plan SET state = 'ready'
+      WHERE project_id = ? AND edit_token = ? AND source_artifact_id = ? AND state <> 'needs_update'
+    `).run(projectId, editToken, sourceArtifactId);
+    return Number(result.changes) === 1;
+  }
+
   getNewArtifactPath(projectId: string, relativePath: string): string {
     validateId(projectId, '项目');
     const projectsRoot = realpathSync(join(this.dataRoot, 'projects'));
@@ -603,6 +662,16 @@ class SqliteStudioRepository implements StudioRepository {
       );
       return Number(result.changes) === 1 ? { saved: true, editToken } : { saved: false, editToken: null };
     });
+  }
+
+  finalizeArtifact(artifactId: string, state: 'available' | 'partial' | 'missing', bytes: number, relativePath?: string): ArtifactRecord {
+    this.assertOpen();
+    const result = this.database.prepare(`
+      UPDATE artifact SET state = ?, bytes = ?, relative_path = COALESCE(?, relative_path)
+      WHERE id = ? AND state = 'pending'
+    `).run(state, bytes, relativePath === undefined ? null : normalizeRelativePath(relativePath), artifactId);
+    if (!Number(result.changes)) throw new StoreError('EDIT_CONFLICT', '成果已结束发布。');
+    return this.getArtifact(artifactId)!;
   }
 
   compareAndSaveSettings(settings: SettingsSave): { saved: boolean; editToken: string | null } {

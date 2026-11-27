@@ -8,6 +8,7 @@ export type Project = {
   currentVideoId: string | null;
   currentConversationId: string | null;
   activeTasks: string[];
+  latestRecordingTaskId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -31,7 +32,8 @@ export type Task = {
   state: 'queued' | 'running' | 'waiting_input' | 'cancelling' | 'succeeded' | 'failed' | 'cancelled' | 'interrupted';
   phase: string;
   result: unknown;
-  error: { code: string; message: string; retryable: boolean } | null;
+  error: { code: string; message: string; retryable: boolean; field?: string; lastCompletedStepId?: string;
+    checks?: Array<{ target: string; expected: string | number | boolean | null; actual: string | number | boolean | null }> } | null;
   lastSeq: number;
   createdAt: string;
   startedAt: string | null;
@@ -52,6 +54,27 @@ export type Settings = { values: SettingsValues; effective: SettingsValues; sour
 export type ConnectionProbe = { available: boolean; capabilities: { purposes: string[] }; detail: string };
 export type Connection = { id: string; name: string; kind: string; model: string | null; enabled: boolean; lastProbe: (ConnectionProbe & { at: string }) | null };
 export type Attachment = { id: string; taskId: string | null; metadata?: { name?: string }; extractionState?: Task['state']; extractionError?: { message: string } };
+export type Requirement = {
+  id?: string;
+  text: string;
+  outcome: string;
+  sourceRef: { artifactId: string; locator: string; quote: string } | null;
+  confirmed: boolean;
+};
+export type RequirementScope = { items: Array<Requirement & { id: string; sortOrder: number }>; editToken: string };
+export type PlanDraft = Record<string, unknown>;
+export type Plan = {
+  projectId: string; draft: PlanDraft; state: 'draft' | 'ready' | 'needs_update';
+  issues: Array<{ path: string; code: string; message: string }>; editToken: string;
+  sourceArtifactId: string | null; updatedAt: string;
+};
+export type ScriptArtifact = {
+  id: string; state: 'available' | 'partial' | 'missing'; stale: boolean; createdAt: string;
+  metadata?: { planToken?: string; sourceArtifactId?: string };
+};
+export type CaptureArtifact = Pick<ScriptArtifact, 'id' | 'state' | 'createdAt'> & {
+  metadata?: { captureArtifactId?: string };
+};
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number, readonly code: string, readonly field?: string, readonly taskId?: string) {
@@ -102,14 +125,38 @@ export const api = {
   },
   listProjects: () => request<Project[]>('/api/v1/projects'),
   getProject: (id: string) => request<Project>(`/api/v1/projects/${encodeURIComponent(id)}`),
+  getPlan: (id: string) => request<Plan>(`/api/v1/projects/${encodeURIComponent(id)}/plan`),
+  savePlan: (id: string, draft: PlanDraft, editToken: string) =>
+    request<Plan>(`/api/v1/projects/${encodeURIComponent(id)}/plan`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': `"${editToken}"` },
+      body: JSON.stringify({ draft }),
+    }),
+  previewSpeech: (id: string, text: string) =>
+    request<{ taskId: string }>(`/api/v1/projects/${encodeURIComponent(id)}/speech-preview`, json({ text })),
+  generateScripts: (id: string, requestId: string) =>
+    request<{ taskId: string }>(`/api/v1/projects/${encodeURIComponent(id)}/scripts`, json({ requestId })),
+  listScripts: (id: string) => request<ScriptArtifact[]>(`/api/v1/projects/${encodeURIComponent(id)}/artifacts?kind=script`),
+  startRecording: (id: string, body: { requestId: string; planToken: string; scriptArtifactId: string }) =>
+    request<{ taskId: string }>(`/api/v1/projects/${encodeURIComponent(id)}/recordings`, json(body)),
+  listCaptures: (id: string) => request<CaptureArtifact[]>(`/api/v1/projects/${encodeURIComponent(id)}/artifacts?kind=capture`),
+  openPreview: (id: string) => request<{ previewUrl: string }>(
+    `/api/v1/projects/${encodeURIComponent(id)}/preview`, { method: 'POST' },
+  ),
   createProject: (body: { title: string; brief: string }) => request<Project>('/api/v1/projects', json(body)),
   patchProject: (id: string, body: { title?: string; brief?: string; connectionId?: string | null }) =>
     request<Project>(`/api/v1/projects/${encodeURIComponent(id)}`, json(body, 'PATCH')),
+  getRequirements: (id: string) =>
+    request<RequirementScope & { proposal: Requirement[] }>(`/api/v1/projects/${encodeURIComponent(id)}/requirements`),
+  saveRequirements: (id: string, items: Requirement[], editToken: string) =>
+    request<RequirementScope>(`/api/v1/projects/${encodeURIComponent(id)}/requirements`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'If-Match': `"${editToken}"` },
+      body: JSON.stringify({ items: items.map((item, sortOrder) => ({ ...item, sortOrder })) }),
+    }),
   listMessages: (projectId: string, conversationId?: string | null) => {
     const query = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : '';
     return request<{ conversationId?: string; items: Message[]; nextAfterId: string | null }>(`/api/v1/projects/${encodeURIComponent(projectId)}/messages${query}`);
   },
-  postMessage: (projectId: string, body: { requestId: string; conversationId?: string; purpose: 'discuss' | 'requirements'; text: string }) =>
+  postMessage: (projectId: string, body: { requestId: string; conversationId?: string; purpose: 'discuss' | 'requirements' | 'system' | 'plan'; text: string }) =>
     request<{ taskId: string; projectId: string; conversationId: string; state: Task['state']; requestId: string }>(
       `/api/v1/projects/${encodeURIComponent(projectId)}/messages`, json(body),
     ),
@@ -121,6 +168,10 @@ export const api = {
 
 function settingsPath(id?: string) {
   return id ? `/api/v1/projects/${encodeURIComponent(id)}/settings` : '/api/v1/settings';
+}
+
+export function artifactContentUrl(projectId: string, artifactId: string, download = false) {
+  return `/api/v1/artifacts/${encodeURIComponent(artifactId)}/content?projectId=${encodeURIComponent(projectId)}${download ? '&download=1' : ''}`;
 }
 
 export function isTaskActive(state: Task['state'] | undefined): boolean {
